@@ -1,0 +1,20 @@
+services:
+  backend:
+    build:
+      context: ../backend
+    container_name: docx-service-backend
+    restart: unless-stopped
+    volumes:
+      - ../backend/data:/app/backend/data
+    expose:
+      - "8080"
+
+  web:
+    build:
+      context: ../frontend
+    container_name: docx-service-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"

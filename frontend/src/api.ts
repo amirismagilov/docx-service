@@ -1,2 +1,2 @@
-/** Базовый URL REST API (тот же хост, что и у Vite в dev). */
-export const API_BASE = 'http://localhost:8080/api'
+/** Базовый URL REST API: в production работает через same-origin proxy `/api`. */
+export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
