@@ -1,51 +1,42 @@
-# DOCX Generation Service MVP
+# DOCX Service
 
-Сервис генерации печатных форм в формате DOCX на стеке **React + Python (FastAPI)**.
+Сервис для управления DOCX-шаблонами и генерации документов на стеке **React + FastAPI**.
 
-## Что реализовано
+## Что умеет сейчас
 
-- No-code управление шаблонами и версиями через API и UI.
-- Визуальный редактор шаблона (schema + template body + mapping + DSL rules).
-- Асинхронная генерация через очередь `asyncio` и фоновый worker.
-- API-ключи для интеграций внешних систем.
-- Webhook test endpoint и webhook уведомление после успешной генерации.
-- Базовая модель сложных правил (условные блоки `if`) для крупных документов.
+- Создавать, переименовывать и удалять шаблоны документов.
+- Работать с версиями шаблонов и публиковать актуальную версию.
+- Загружать исходный `.docx` и показывать его предпросмотр в браузере.
+- Вставлять теги вида `{{field_id}}` прямо в DOCX по выделенному тексту.
+- Поддерживать составные вставки: несколько тегов, произвольный текст, `\n` и `[[PARA_BREAK]]`.
+- Заполнять шаблон данными формы и скачивать готовый DOCX.
+- Сохранять шаблоны между перезапусками через `backend/data/store.json`.
+- Предоставлять HTTP API для UI и внешних интеграций.
 
-## Структура
+## Структура проекта
 
-- `backend/app` — FastAPI приложение (`main.py`, `generator.py`).
-- `frontend` — React + Vite UI.
-- `docker-compose.yml` — локальный запуск API/UI/Redis/MinIO.
+- `backend` — FastAPI API, DOCX-операции, тесты.
+- `frontend` — React + Vite UI для списка документов, редактирования и предпросмотра.
+- `docs` — рабочая документация по развитию продукта.
+- `docker-compose.yml` — локальный запуск проекта в контейнерах.
 
-## Запуск
+## Быстрый старт
 
-### Вариант 1: Docker
+### Локально
 
-```bash
-cd docx-service
-docker compose up --build
-```
+Требования:
 
-- API (OpenAPI / Swagger UI): [http://localhost:8080/docs](http://localhost:8080/docs)
-- Web: [http://localhost:5175](http://localhost:5175)
+- Python 3.11+
+- Node.js 20+
 
-### Вариант 2: Локально
-
-Backend (Python 3.11+):
+Backend:
 
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
-```
-
-Тесты:
-
-```bash
-cd backend
-pytest
 ```
 
 Frontend:
@@ -56,18 +47,54 @@ npm install
 npm run dev
 ```
 
-## API поток для интеграции
+После запуска:
 
-1. `POST /api/clients` — получить `apiKey`.
-2. `POST /api/templates` — создать шаблон.
-3. `POST /api/templates/{id}/versions` — добавить версию.
-4. `POST /api/templates/{id}/versions/{versionId}/publish` — опубликовать.
-5. `POST /api/jobs` с заголовком `X-Api-Key` — запустить генерацию.
-6. `GET /api/jobs/{id}` — отслеживать статус.
-7. `GET /api/jobs/{id}/result` — скачать файл.
+- API: [http://localhost:8080/docs](http://localhost:8080/docs)
+- UI: [http://localhost:5175](http://localhost:5175)
 
-## Ограничения текущего MVP
+### Docker Compose
 
-- Данные хранятся в памяти процесса (для production заменить на PostgreSQL).
-- Генератор выдаёт файл с расширением `.docx` из текстового шаблона; для валидного OOXML-пакета можно подключить библиотеку работы с Open XML.
-- Rate limiting и OAuth2 — отдельный этап hardening.
+```bash
+docker compose up --build
+```
+
+## Полезные команды
+
+Backend tests:
+
+```bash
+cd backend
+pytest
+```
+
+Frontend production build:
+
+```bash
+cd frontend
+npm run build
+```
+
+## Основные сценарии API
+
+### Управление шаблонами
+
+- `GET /api/templates`
+- `POST /api/templates/bootstrap-empty`
+- `POST /api/templates/dkp-bootstrap`
+- `GET /api/templates/{id}`
+- `PATCH /api/templates/{id}`
+- `DELETE /api/templates/{id}`
+
+### Работа с версиями и DOCX
+
+- `POST /api/templates/{id}/versions/{versionId}/upload-docx`
+- `POST /api/templates/{id}/versions/{versionId}/publish`
+- `GET /api/templates/{id}/versions/{versionId}/docx-file`
+- `POST /api/templates/{id}/versions/{versionId}/render-sync`
+- `POST /api/templates/{id}/versions/{versionId}/apply-tag`
+
+## Замечания
+
+- `[[PARA_BREAK]]` работает только когда замена применяется ко всему абзацу целиком.
+- При изменении схемы полей или DOCX публикация версии снимается автоматически.
+- Текущее хранилище файлов и метаданных подходит для локальной разработки и MVP, но не для production без отдельной БД и объектного хранилища.
