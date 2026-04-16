@@ -1,0 +1,26 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+**/.venv/
+**/__pycache__/
+backend/data/
+*.py[cod]
+.pytest_cache/
+
+# .NET (legacy)
+**/bin/
+**/obj/
+**/.vs/
+*.user
+*.suo
+
+# OS / IDE
+.DS_Store
+.idea/
+*.swp
+
+# Env
+.env
+.env.*
