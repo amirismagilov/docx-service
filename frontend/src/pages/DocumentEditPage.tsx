@@ -20,7 +20,7 @@ import {
 } from '../schema'
 import type { ConditionalBlock, FieldDef, TagSlot, TemplateDetail } from '../types'
 
-type TabId = 'design' | 'fields' | 'document'
+type TabId = 'setup' | 'template' | 'document'
 
 type FieldRow = FieldDef & { clientKey: string }
 type PreviewTagAnchor = {
@@ -436,7 +436,7 @@ function assignTagSlotsToAnchors(anchors: PreviewTagAnchor[], slots: TagSlot[]):
 
 export default function DocumentEditPage() {
   const { templateId } = useParams<{ templateId: string }>()
-  const [tab, setTab] = useState<TabId>('design')
+  const [tab, setTab] = useState<TabId>('setup')
   const [message, setMessage] = useState('')
   const [detail, setDetail] = useState<TemplateDetail | null>(null)
   const [versionId, setVersionId] = useState<string | null>(null)
@@ -460,6 +460,10 @@ export default function DocumentEditPage() {
   const [tagInputValue, setTagInputValue] = useState('')
   const [templateConfigMode, setTemplateConfigMode] = useState<'tags' | 'conditional'>('tags')
   const [isApplyingTag, setIsApplyingTag] = useState(false)
+  const [isRenamingTemplate, setIsRenamingTemplate] = useState(false)
+  const [isSavingTemplateName, setIsSavingTemplateName] = useState(false)
+  const [templateNameDraft, setTemplateNameDraft] = useState('')
+  const [idCopied, setIdCopied] = useState(false)
   const [tagSlots, setTagSlots] = useState<TagSlot[]>([])
   const [activeTagSlotId, setActiveTagSlotId] = useState<string | null>(null)
   const [revertTarget, setRevertTarget] = useState<PreviewTagAnchor | null>(null)
@@ -473,6 +477,8 @@ export default function DocumentEditPage() {
   const replaceDocxInputRef = useRef<HTMLInputElement>(null)
   const tagComboRef = useRef<HTMLDivElement>(null)
   const activeConditionalPreviewElementsRef = useRef<HTMLElement[]>([])
+  const schemaAutoSaveTimerRef = useRef<number | null>(null)
+  const schemaDraftVersionRef = useRef(0)
   /** После «Редактировать» не сбрасываем tagSlotId, если выделение в превью совпадает с тем же фрагментом. */
   const editSlotContextRef = useRef<{
     rawText: string
@@ -596,6 +602,7 @@ export default function DocumentEditPage() {
     setVersionId(null)
     setPublished(false)
     setSchemaDraftDirty(false)
+    schemaDraftVersionRef.current = 0
     setTagTargetId('')
     setSelectedDocxText('')
     setSelectedOccurrenceIndex(null)
@@ -657,6 +664,19 @@ export default function DocumentEditPage() {
 
   const hasUnpublishedChanges = schemaDraftDirty
   const effectivePublished = published && !hasUnpublishedChanges
+  const publicationSummaryText = schemaDraftDirty
+    ? 'Шаблон изменился: поля/теги сохранены как черновик. Для генерации опубликуйте версию заново.'
+    : !published
+      ? 'Текущая версия — черновик. После публикации шаг «Пример документа» станет доступен.'
+      : 'Версия опубликована и готова к генерации.'
+  const publicationActionHint = effectivePublished
+    ? 'Можно переходить к шагу «Пример документа».'
+    : 'Нажмите «Опубликовать версию», затем сформируйте пример.'
+
+  useEffect(() => {
+    if (!detail || isRenamingTemplate) return
+    setTemplateNameDraft(detail.name)
+  }, [detail, isRenamingTemplate])
 
   useEffect(() => {
     if (!tid || !versionId || loading) return
@@ -825,6 +845,7 @@ export default function DocumentEditPage() {
 
   const patchFieldRow = (clientKey: string, patch: Partial<FieldDef>) => {
     setSchemaDraftDirty(true)
+    schemaDraftVersionRef.current += 1
     setFieldRows((prev) => {
       const cur = prev.find((r) => r.clientKey === clientKey)
       if (!cur) return prev
@@ -848,6 +869,7 @@ export default function DocumentEditPage() {
 
   const addFieldRow = () => {
     setSchemaDraftDirty(true)
+    schemaDraftVersionRef.current += 1
     setFieldRows((prev) => {
       let n = prev.length + 1
       let id = `field_${n}`
@@ -865,6 +887,7 @@ export default function DocumentEditPage() {
 
   const removeFieldRow = (clientKey: string) => {
     setSchemaDraftDirty(true)
+    schemaDraftVersionRef.current += 1
     setFieldRows((prev) => {
       const row = prev.find((r) => r.clientKey === clientKey)
       if (row) {
@@ -880,8 +903,9 @@ export default function DocumentEditPage() {
     })
   }
 
-  const saveSchema = async () => {
+  const saveSchema = async (opts?: { silentSuccess?: boolean }) => {
     if (!tid) return
+    const versionAtStart = schemaDraftVersionRef.current
     const defs: FieldDef[] = fieldRows.map((r) => ({
       id: r.id.trim(),
       label: (r.label.trim() || r.id.trim()) || 'Поле',
@@ -917,14 +941,32 @@ export default function DocumentEditPage() {
     setDetail(d)
     // После изменения schema считаем публикацию недействительной до явной републикации
     setPublished(false)
-    setFormValues((fv) => mergeFormValues(fv, normalized))
-    setFieldRows(normalized.map((f) => ({ ...f, clientKey: newClientKey() })))
-    setSchemaDraftDirty(false)
-    setMessage('Схема полей сохранена.')
+    if (schemaDraftVersionRef.current === versionAtStart) {
+      setFormValues((fv) => mergeFormValues(fv, normalized))
+      setFieldRows(normalized.map((f) => ({ ...f, clientKey: newClientKey() })))
+      setSchemaDraftDirty(false)
+      if (!opts?.silentSuccess) setMessage('Схема полей сохранена.')
+    }
   }
 
   useEffect(() => {
-    if (!tid || !versionId || tab !== 'design') return
+    if (!tid || !schemaDraftDirty) return
+    if (schemaAutoSaveTimerRef.current != null) {
+      window.clearTimeout(schemaAutoSaveTimerRef.current)
+    }
+    schemaAutoSaveTimerRef.current = window.setTimeout(() => {
+      void saveSchema({ silentSuccess: true })
+    }, 700)
+    return () => {
+      if (schemaAutoSaveTimerRef.current != null) {
+        window.clearTimeout(schemaAutoSaveTimerRef.current)
+        schemaAutoSaveTimerRef.current = null
+      }
+    }
+  }, [tid, schemaDraftDirty, fieldRows])
+
+  useEffect(() => {
+    if (!tid || !versionId || tab !== 'template') return
     const t = requestAnimationFrame(() => {
       void refreshPreview(tid, versionId)
     })
@@ -938,11 +980,7 @@ export default function DocumentEditPage() {
     setPublished(ver?.status === 1)
     await refreshTagSlots(newVid)
     await refreshConditionalBlocks(newVid)
-    if (tab === 'design') await refreshPreview(detail.id, newVid)
-  }
-
-  const insertFieldTag = (fieldId: string) => {
-    setMessage(`Тег {{${fieldId}}} используйте в DOCX-шаблоне и затем загрузите файл заново.`)
+    if (tab === 'template') await refreshPreview(detail.id, newVid)
   }
 
   const uploadDocxFile = async (file: File) => {
@@ -969,7 +1007,7 @@ export default function DocumentEditPage() {
     await refreshTemplateDetailFromApi()
     await refreshTagSlots()
     await refreshConditionalBlocks()
-    if (tab === 'design') await refreshPreview(tid, versionId)
+    if (tab === 'template') await refreshPreview(tid, versionId)
   }
 
   const onUploadDocx = async (e: FormEvent<HTMLInputElement>) => {
@@ -1114,7 +1152,7 @@ export default function DocumentEditPage() {
       editSlotContextRef.current = null
       await refreshTagSlots()
       await refreshConditionalBlocks()
-      if (tab === 'design') await refreshPreview(tid, versionId)
+      if (tab === 'template') await refreshPreview(tid, versionId)
     } catch (e) {
       setMessage(e instanceof Error ? `Ошибка сети: ${e.message}` : 'Не удалось отправить запрос к серверу.')
     } finally {
@@ -1156,7 +1194,7 @@ export default function DocumentEditPage() {
       editSlotContextRef.current = null
       await refreshTagSlots()
       await refreshConditionalBlocks()
-      if (tab === 'design') await refreshPreview(tid, versionId)
+      if (tab === 'template') await refreshPreview(tid, versionId)
     } catch (e) {
       setMessage(e instanceof Error ? `Ошибка сети: ${e.message}` : 'Не удалось отправить запрос к серверу.')
     } finally {
@@ -1448,6 +1486,51 @@ export default function DocumentEditPage() {
     }
   }
 
+  const saveTemplateName = async () => {
+    if (!tid || !detail) return
+    const next = templateNameDraft.trim()
+    if (!next) {
+      setMessage('Название документа не должно быть пустым.')
+      return
+    }
+    if (next === detail.name) {
+      setIsRenamingTemplate(false)
+      return
+    }
+    setIsSavingTemplateName(true)
+    try {
+      const r = await fetch(`${API_BASE}/templates/${tid}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: next }),
+      })
+      const raw = await r.text()
+      if (!r.ok) {
+        setMessage(parseLoadErrorText(raw))
+        return
+      }
+      const d = JSON.parse(raw) as TemplateDetail
+      setDetail(d)
+      setTemplateNameDraft(d.name)
+      setIsRenamingTemplate(false)
+      setMessage('Название документа обновлено.')
+    } catch (e) {
+      setMessage(e instanceof Error ? `Ошибка сети: ${e.message}` : 'Не удалось обновить название документа.')
+    } finally {
+      setIsSavingTemplateName(false)
+    }
+  }
+
+  const copyTemplateId = async () => {
+    try {
+      await navigator.clipboard.writeText(detail.id)
+      setIdCopied(true)
+      window.setTimeout(() => setIdCopied(false), 1400)
+    } catch {
+      setMessage('Не удалось скопировать ID документа.')
+    }
+  }
+
   const generateDocument = async () => {
     if (!tid || !versionId) return
     const r = await fetch(`${API_BASE}/templates/${tid}/versions/${versionId}/render-sync`, {
@@ -1510,27 +1593,79 @@ export default function DocumentEditPage() {
           <span className="breadcrumb-sep">/</span>
           <span>{detail.name}</span>
         </div>
-        <h1>Редактирование: {detail.name}</h1>
+        {!isRenamingTemplate ? (
+          <div className="doc-title-row">
+            <h1>Редактирование: {detail.name}</h1>
+            <button
+              type="button"
+              className="btn-secondary icon-pencil-btn"
+              onClick={() => setIsRenamingTemplate(true)}
+              title="Редактировать название"
+              aria-label="Редактировать название"
+            >
+              ✏️
+            </button>
+          </div>
+        ) : (
+          <div className="doc-title-edit">
+            <label>
+              Название документа
+              <input
+                value={templateNameDraft}
+                onChange={(e) => setTemplateNameDraft(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <div className="row">
+              <button type="button" onClick={() => void saveTemplateName()} disabled={isSavingTemplateName}>
+                {isSavingTemplateName ? 'Сохраняем…' : 'Сохранить'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setTemplateNameDraft(detail.name)
+                  setIsRenamingTemplate(false)
+                }}
+                disabled={isSavingTemplateName}
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        )}
+        <p className="hint doc-id-row">
+          ID документа: <code>{detail.id}</code>
+          <button
+            type="button"
+            className="btn-text copy-id-btn"
+            onClick={() => void copyTemplateId()}
+            title="Скопировать ID"
+          >
+            {idCopied ? 'Скопировано' : 'Копировать'}
+          </button>
+        </p>
         <p className="lead">
-          Шаблон: поля, загрузка .docx, текст и предпросмотр. Документ: заполнение и скачивание.
+          1) Добавьте файл и настройте поля, 2) настройте шаблон, 3) сформируйте пример документа.
         </p>
         <div className="row row-spread">
           <nav className="tabs" aria-label="Разделы">
             <button
               type="button"
-              className={tab === 'design' ? 'tab tab-active' : 'tab'}
-              data-main-tab="design"
-              onClick={() => setTab('design')}
+              className={tab === 'setup' ? 'tab tab-active' : 'tab'}
+              data-main-tab="setup"
+              onClick={() => setTab('setup')}
             >
-              Шаблон
+              1. Файл и поля
             </button>
             <button
               type="button"
-              className={tab === 'fields' ? 'tab tab-active' : 'tab'}
-              data-main-tab="fields"
-              onClick={() => setTab('fields')}
+              className={tab === 'template' ? 'tab tab-active' : 'tab'}
+              data-main-tab="template"
+              onClick={() => setTab('template')}
             >
-              Поля
+              2. Шаблон
             </button>
             <button
               type="button"
@@ -1538,7 +1673,8 @@ export default function DocumentEditPage() {
               data-main-tab="document"
               onClick={() => setTab('document')}
             >
-              Документ
+              3. Пример документа
+              {!effectivePublished ? <span className="tab-lock-indicator">🔒</span> : null}
             </button>
           </nav>
           {versionsSorted.length > 1 && (
@@ -1560,34 +1696,40 @@ export default function DocumentEditPage() {
         </div>
       </header>
 
-      {tab === 'design' && (
+      {(tab === 'setup' || tab === 'template') && (
         <>
-          {(schemaDraftDirty || !published || isBinaryDocxMode) && (
+          {(tab === 'template' && (schemaDraftDirty || !published || isBinaryDocxMode)) && (
             <section className="card publication-notice">
-              <p className="message message-warn publication-notice-text">
-                {schemaDraftDirty && (
-                  <span>
-                    Поля формы или теги <code>{'{{…}}'}</code> изменены — нажмите «Сохранить схему полей».
-                    {published
-                      ? ' После сохранения все опубликованные версии этого шаблона будут сняты с публикации.'
-                      : ' Затем снова опубликуйте версию.'}{' '}
+              <div className="publication-notice-head">
+                <div className="publication-notice-title-wrap">
+                  <strong>Статус публикации</strong>
+                  <span
+                    className={
+                      effectivePublished
+                        ? 'publication-status-badge publication-status-ok'
+                        : 'publication-status-badge publication-status-draft'
+                    }
+                  >
+                    {effectivePublished ? '✅ Опубликовано' : '⚠️ Есть неопубликованные изменения'}
                   </span>
-                )}
-                {!published && !schemaDraftDirty && (
-                  <span>
-                    Есть неопубликованные изменения на сервере: текущая версия в статусе черновика. Опубликуйте её, чтобы
-                    формировать документ на вкладке «Документ».
-                  </span>
-                )}
+                </div>
+                <button type="button" onClick={() => void publishTemplate()} disabled={effectivePublished}>
+                  {effectivePublished ? 'Эта версия опубликована' : hasUnpublishedChanges ? 'Опубликовать версию снова' : 'Опубликовать версию'}
+                </button>
+              </div>
+              <div className="publication-notice-body">
+                <p className="publication-notice-text">{publicationSummaryText}</p>
                 {isBinaryDocxMode && (
-                  <span>
-                    Вы в режиме Word-шаблона. Чтобы сохранить форматирование, используйте вставку тегов в предпросмотре (выделить текст → Вставить тег) или загрузите обновлённый DOCX. Текстовое сохранение отключено.
-                  </span>
+                  <div className="publication-inline-note">
+                    Режим Word-шаблона активен. Форматирование сохраняется, прямое текстовое редактирование отключено.
+                  </div>
                 )}
-              </p>
+                <p className="hint">{publicationActionHint}</p>
+              </div>
             </section>
           )}
 
+          {tab === 'setup' && (
           <section className="card">
             <h2>Загрузка шаблона Word</h2>
             {!isBinaryDocxMode ? (
@@ -1629,7 +1771,7 @@ export default function DocumentEditPage() {
                       <p className="docx-replace-warning-text">
                         <strong>Внимание</strong> — новый файл заменит текущий DOCX этой версии. Вставленные в документ теги,
                         правки в предпросмотре и несохранённые локальные изменения шаблона будут потеряны. Схему полей на
-                        вкладке «Поля» это не удаляет, но несохранённые правки в редакторе могут потеряться.
+                        шаге «Файл и поля» это не удаляет, но несохранённые правки в редакторе могут потеряться.
                       </p>
                       <div className="row">
                         <button type="button" onClick={() => replaceDocxInputRef.current?.click()}>
@@ -1664,7 +1806,9 @@ export default function DocumentEditPage() {
               Плейсхолдеры в Word — одним фрагментом, например <code>{'{{price_amount}}'}</code>.
             </p>
           </section>
+          )}
 
+          {tab === 'template' && (
           <section className="card">
             <h2>Настройка шаблона</h2>
             {isBinaryDocxMode && (
@@ -1745,7 +1889,7 @@ export default function DocumentEditPage() {
                             placeholder={
                               fields.length
                                 ? 'Поиск по id или подписи…'
-                                : 'Введите id тега (латиница, цифры, _) или добавьте поля на вкладке «Поля»'
+                                : 'Введите id тега (латиница, цифры, _) или добавьте поля на шаге «Файл и поля»'
                             }
                             autoComplete="off"
                             spellCheck={false}
@@ -2020,35 +2164,21 @@ export default function DocumentEditPage() {
               </div>
             ) : null}
           </section>
+          )}
 
-          <section className="card">
-            <h2>Публикация</h2>
-            <div className="row">
-              <button type="button" onClick={() => void publishTemplate()} disabled={effectivePublished}>
-                {effectivePublished ? 'Эта версия опубликована' : hasUnpublishedChanges ? 'Опубликовать версию снова' : 'Опубликовать версию'}
-              </button>
-              <span className="hint">
-                {effectivePublished
-                  ? 'После изменения схемы полей или DOCX снова нажмите «Опубликовать», если кнопка станет активной.'
-                  : 'Без публикации нельзя сформировать файл на вкладке «Документ». Загрузка .docx публикует версию автоматически.'}
-              </span>
-            </div>
-          </section>
+          
         </>
       )}
 
-      {tab === 'fields' && (
+      {tab === 'setup' && (
         <section className="card">
           <h2>Динамические поля</h2>
           <p className="hint">
-            Идентификатор используется в шаблоне как <code>{'{{id}}'}</code>. После изменений нажмите «Сохранить схему».
+            Идентификатор используется в шаблоне как <code>{'{{id}}'}</code>. Изменения сохраняются автоматически.
           </p>
           <div className="field-editor-actions-top">
             <button type="button" className="btn-secondary" onClick={addFieldRow}>
               Добавить поле
-            </button>
-            <button type="button" onClick={() => void saveSchema()}>
-              Сохранить схему полей
             </button>
           </div>
           {fieldRows.length === 0 ? (
@@ -2079,11 +2209,6 @@ export default function DocumentEditPage() {
                     />
                   </label>
                   <div className="field-editor-row-btns">
-                      <button type="button" className="btn-secondary" onClick={() => insertFieldTag(row.id)} disabled={isBinaryDocxMode}>
-                      Вставить {'{{' + row.id + '}}'}
-                    </button>
-                  </div>
-                  <div className="field-editor-row-btns">
                     <button type="button" className="btn-text btn-danger" onClick={() => removeFieldRow(row.clientKey)}>
                       Удалить
                     </button>
@@ -2102,10 +2227,10 @@ export default function DocumentEditPage() {
         <section className="card">
           <h2>Заполнение и генерация</h2>
           {fields.length === 0 ? (
-            <p className="hint">Нет полей. На вкладке «Шаблон» добавьте поля и сохраните схему.</p>
+            <p className="hint">Нет полей. На шаге «Файл и поля» добавьте поля и сохраните схему.</p>
           ) : (
             <>
-              {!effectivePublished && <p className="message message-warn">Сначала опубликуйте версию на вкладке «Шаблон».</p>}
+              {!effectivePublished && <p className="message message-warn">Сначала опубликуйте версию на шаге «Шаблон».</p>}
               <form
                 className="form-grid"
                 onSubmit={(e) => {
@@ -2125,7 +2250,7 @@ export default function DocumentEditPage() {
                 ))}
                 <div className="row">
                   <button type="submit" disabled={!effectivePublished}>
-                    Сформировать и скачать .docx
+                    {!effectivePublished ? '🔒 Сначала опубликуйте версию' : 'Сформировать и скачать .docx'}
                   </button>
                 </div>
               </form>

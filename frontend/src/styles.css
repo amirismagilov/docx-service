@@ -107,6 +107,46 @@ pre {
   z-index: 2;
 }
 
+.doc-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.doc-title-row h1 {
+  margin: 0;
+}
+
+.icon-pencil-btn {
+  min-width: 40px;
+  padding: 8px 10px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.doc-title-edit {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.doc-id-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.copy-id-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4338ca;
+  text-decoration: underline;
+}
+
 .tabs {
   display: flex;
   gap: 8px;
@@ -124,6 +164,13 @@ pre {
   background: #eef2ff;
   color: #312e81;
   font-weight: 600;
+}
+
+.tab-lock-indicator {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 12px;
+  vertical-align: middle;
 }
 
 /* Вторичные переключатели (не путать с разделами Шаблон/Поля/Документ) */
@@ -149,6 +196,62 @@ pre {
 .publication-notice-text {
   margin: 0;
   line-height: 1.45;
+  color: #334155;
+}
+
+.publication-notice-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.publication-notice-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.publication-status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.publication-status-ok {
+  color: #166534;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+
+.publication-status-draft {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+
+.publication-notice-body {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #f1f5f9;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.publication-inline-note {
+  display: inline-block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 13px;
 }
 
 .field-grid {
