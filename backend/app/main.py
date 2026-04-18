@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from collections import defaultdict
@@ -29,6 +30,7 @@ from app.docx_ops import (
     expand_replacement_escapes,
     extract_plain_text_from_docx,
     norm_tag_fragment,
+    remove_docx_fragment,
     render_version_to_docx,
 )
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
@@ -92,6 +94,24 @@ class RevertTagBody(BaseModel):
     tagSlotId: uuid.UUID
     findText: str
     occurrenceIndex: int
+
+
+class CreateConditionalBlockBody(BaseModel):
+    findTemplate: str
+    occurrenceIndex: int
+    conditionField: str
+    equalsValue: str = ""
+    branch: str = "if"
+    elseGroupId: uuid.UUID | None = None
+
+
+class PatchConditionalBlockBody(BaseModel):
+    findTemplate: str | None = None
+    occurrenceIndex: int | None = None
+    conditionField: str | None = None
+    equalsValue: str | None = None
+    branch: str | None = None
+    elseGroupId: uuid.UUID | None = None
 
 
 class PatchTemplateRequest(BaseModel):
@@ -216,6 +236,7 @@ async def _process_job(job_id: uuid.UUID, http_client: httpx.AsyncClient) -> Non
             bindings_json=ver["bindings_json"],
             rules_json=ver["rules_json"],
             payload_json=job["payload_json"],
+            conditional_blocks=ver.get("conditional_blocks") or [],
         )
         job["result_bytes"] = data
         job["result_file_name"] = fn
@@ -319,6 +340,7 @@ def bootstrap_dkp_template() -> dict[str, Any]:
         "docx_bytes": docx_bytes,
         "source_file_name": None,
         "tag_slots": [],
+        "conditional_blocks": [],
     }
     _persist_templates()
     return {
@@ -476,6 +498,7 @@ def bootstrap_empty_template(body: BootstrapEmptyTemplateRequest) -> dict[str, A
         "docx_bytes": None,
         "source_file_name": None,
         "tag_slots": [],
+        "conditional_blocks": [],
     }
     _persist_templates()
     return {
@@ -507,6 +530,7 @@ def create_version(template_id: uuid.UUID, body: CreateTemplateVersionRequest) -
         "docx_bytes": None,
         "source_file_name": None,
         "tag_slots": [],
+        "conditional_blocks": [],
     }
     template_versions[vid] = v
     _persist_templates()
@@ -713,6 +737,86 @@ def _resync_tag_slots(v: dict[str, Any]) -> None:
     slots[:] = kept
 
 
+def _conditional_find_candidates(find_template: str) -> list[str]:
+    base = find_template.replace("\r\n", "\n").replace("\r", "\n")
+    candidates: list[str] = []
+    variants = [
+        base,
+        norm_tag_fragment(base),
+        re.sub(r"[^\S\r\n]*\n[^\S\r\n]*", "\n", norm_tag_fragment(base)).strip(),
+        re.sub(r"\n{2,}", "\n", re.sub(r"[^\S\r\n]*\n[^\S\r\n]*", "\n", norm_tag_fragment(base))).strip(),
+    ]
+    for v in variants:
+        if v and v not in candidates:
+            candidates.append(v)
+    return candidates
+
+
+def _resolve_conditional_block_target(docx_bytes: bytes, find_template: str, occurrence_index: int) -> tuple[str, int]:
+    if not find_template:
+        raise HTTPException(status_code=400, detail="findTemplate не должен быть пустым.")
+    if occurrence_index < 0:
+        raise HTTPException(status_code=400, detail="occurrenceIndex должен быть >= 0.")
+
+    def _is_large_fragment(s: str) -> bool:
+        normalized = norm_tag_fragment(s).strip()
+        non_empty_lines = [x for x in (ln.strip() for ln in normalized.split("\n")) if x]
+        return len(normalized) > 600 or len(non_empty_lines) > 8
+
+    for candidate in _conditional_find_candidates(find_template):
+        is_large = _is_large_fragment(candidate)
+        if not is_large:
+            probe_token = "__CURSOR_CONDITIONAL_PROBE__"
+            _updated, ok, used_occ = _try_single_replace_with_fallbacks(
+                docx_bytes,
+                candidate,
+                probe_token,
+                preferred_occurrence=occurrence_index,
+                max_scan_occurrences=256,
+            )
+            if ok and used_occ is not None:
+                return candidate, used_occ
+
+        _updated_large, ok_large = remove_docx_fragment(docx_bytes, candidate, occurrence_index)
+        if ok_large:
+            return candidate, occurrence_index
+
+        # Для больших фрагментов ограничиваем fallback-скан, иначе создание блока слишком медленное.
+        max_scan = 48 if is_large else 256
+        for occ in range(max_scan):
+            if occ == occurrence_index:
+                continue
+            _updated_large, ok_large = remove_docx_fragment(docx_bytes, candidate, occ)
+            if ok_large:
+                return candidate, occ
+    raise HTTPException(
+        status_code=404,
+        detail="Фрагмент условного блока не найден в DOCX по findTemplate/occurrenceIndex.",
+    )
+
+
+def _conditional_block_to_api(b: dict[str, Any]) -> dict[str, Any]:
+    created = b.get("created_at_utc")
+    group = b.get("else_group_id")
+    return {
+        "id": str(b["id"]),
+        "findTemplate": b["find_template"],
+        "occurrenceIndex": b["occurrence_index"],
+        "conditionField": b["condition_field"],
+        "equalsValue": b.get("equals_value", ""),
+        "branch": b.get("branch", "if"),
+        "elseGroupId": str(group) if group else None,
+        "createdAtUtc": created.isoformat().replace("+00:00", "Z") if created else None,
+    }
+
+
+def _validate_conditional_branch(value: str) -> str:
+    v = (value or "if").strip().lower()
+    if v not in {"if", "else"}:
+        raise HTTPException(status_code=400, detail="branch должен быть 'if' или 'else'.")
+    return v
+
+
 @app.post("/api/templates/{template_id}/versions/{version_id}/apply-tag")
 def apply_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: ApplyTagBody) -> dict[str, Any]:
     v = template_versions.get(version_id)
@@ -844,6 +948,107 @@ def list_tag_slots(template_id: uuid.UUID, version_id: uuid.UUID) -> list[dict[s
     return out
 
 
+@app.get("/api/templates/{template_id}/versions/{version_id}/conditional-blocks")
+def list_conditional_blocks(template_id: uuid.UUID, version_id: uuid.UUID) -> list[dict[str, Any]]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Template/version not found.")
+    blocks = v.get("conditional_blocks") or []
+    return [_conditional_block_to_api(b) for b in blocks]
+
+
+@app.post("/api/templates/{template_id}/versions/{version_id}/conditional-blocks")
+def create_conditional_block(template_id: uuid.UUID, version_id: uuid.UUID, body: CreateConditionalBlockBody) -> dict[str, Any]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Template/version not found.")
+    docx_bytes = v.get("docx_bytes")
+    if not docx_bytes:
+        raise HTTPException(status_code=400, detail="Для этой версии нет загруженного DOCX.")
+    cond_field = body.conditionField.strip()
+    if not cond_field:
+        raise HTTPException(status_code=400, detail="conditionField обязателен.")
+    find_template, occurrence_index = _resolve_conditional_block_target(
+        docx_bytes,
+        body.findTemplate,
+        body.occurrenceIndex,
+    )
+    branch = _validate_conditional_branch(body.branch)
+    new_id = uuid.uuid4()
+    block = {
+        "id": new_id,
+        "find_template": find_template,
+        "occurrence_index": occurrence_index,
+        "condition_field": cond_field,
+        "equals_value": body.equalsValue,
+        "branch": branch,
+        "else_group_id": body.elseGroupId,
+        "created_at_utc": datetime.now(timezone.utc),
+    }
+    blocks: list[dict[str, Any]] = v.setdefault("conditional_blocks", [])
+    blocks.append(block)
+    _invalidate_publication_for_version(template_id, version_id)
+    _persist_templates()
+    return _conditional_block_to_api(block)
+
+
+@app.patch("/api/templates/{template_id}/versions/{version_id}/conditional-blocks/{block_id}")
+def patch_conditional_block(
+    template_id: uuid.UUID,
+    version_id: uuid.UUID,
+    block_id: uuid.UUID,
+    body: PatchConditionalBlockBody,
+) -> dict[str, Any]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Template/version not found.")
+    blocks: list[dict[str, Any]] = v.setdefault("conditional_blocks", [])
+    block = next((b for b in blocks if b["id"] == block_id), None)
+    if block is None:
+        raise HTTPException(status_code=404, detail="Conditional block not found.")
+    docx_bytes = v.get("docx_bytes")
+    if not docx_bytes:
+        raise HTTPException(status_code=400, detail="Для этой версии нет загруженного DOCX.")
+    requested_find_template = block["find_template"] if body.findTemplate is None else body.findTemplate
+    requested_occurrence_index = block["occurrence_index"] if body.occurrenceIndex is None else body.occurrenceIndex
+    find_template, occurrence_index = _resolve_conditional_block_target(
+        docx_bytes,
+        requested_find_template,
+        requested_occurrence_index,
+    )
+    if body.conditionField is not None:
+        cond_field = body.conditionField.strip()
+        if not cond_field:
+            raise HTTPException(status_code=400, detail="conditionField обязателен.")
+        block["condition_field"] = cond_field
+    if body.equalsValue is not None:
+        block["equals_value"] = body.equalsValue
+    if body.branch is not None:
+        block["branch"] = _validate_conditional_branch(body.branch)
+    if "elseGroupId" in body.model_fields_set:
+        block["else_group_id"] = body.elseGroupId
+    block["find_template"] = find_template
+    block["occurrence_index"] = occurrence_index
+    _invalidate_publication_for_version(template_id, version_id)
+    _persist_templates()
+    return _conditional_block_to_api(block)
+
+
+@app.delete("/api/templates/{template_id}/versions/{version_id}/conditional-blocks/{block_id}")
+def delete_conditional_block(template_id: uuid.UUID, version_id: uuid.UUID, block_id: uuid.UUID) -> dict[str, bool]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Template/version not found.")
+    blocks: list[dict[str, Any]] = v.setdefault("conditional_blocks", [])
+    before = len(blocks)
+    blocks[:] = [b for b in blocks if b["id"] != block_id]
+    if len(blocks) == before:
+        raise HTTPException(status_code=404, detail="Conditional block not found.")
+    _invalidate_publication_for_version(template_id, version_id)
+    _persist_templates()
+    return {"ok": True}
+
+
 @app.post("/api/templates/{template_id}/versions/{version_id}/revert-tag")
 def revert_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: RevertTagBody) -> dict[str, Any]:
     v = template_versions.get(version_id)
@@ -915,6 +1120,7 @@ def render_sync(
         bindings_json=v["bindings_json"],
         rules_json=v["rules_json"],
         payload_json=payload_json,
+        conditional_blocks=v.get("conditional_blocks") or [],
     )
     return Response(
         content=data,

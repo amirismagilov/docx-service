@@ -18,7 +18,7 @@ import {
   sanitizeFieldId,
   schemaJsonToFields,
 } from '../schema'
-import type { FieldDef, TagSlot, TemplateDetail } from '../types'
+import type { ConditionalBlock, FieldDef, TagSlot, TemplateDetail } from '../types'
 
 type TabId = 'design' | 'fields' | 'document'
 
@@ -458,15 +458,21 @@ export default function DocumentEditPage() {
   const [tagComboOpen, setTagComboOpen] = useState(false)
   const [tagComboHighlight, setTagComboHighlight] = useState(0)
   const [tagInputValue, setTagInputValue] = useState('')
+  const [templateConfigMode, setTemplateConfigMode] = useState<'tags' | 'conditional'>('tags')
   const [isApplyingTag, setIsApplyingTag] = useState(false)
   const [tagSlots, setTagSlots] = useState<TagSlot[]>([])
   const [activeTagSlotId, setActiveTagSlotId] = useState<string | null>(null)
   const [revertTarget, setRevertTarget] = useState<PreviewTagAnchor | null>(null)
+  const [conditionalBlocks, setConditionalBlocks] = useState<ConditionalBlock[]>([])
+  const [conditionalField, setConditionalField] = useState('')
+  const [conditionalEqualsValue, setConditionalEqualsValue] = useState('')
+  const [editingConditionalId, setEditingConditionalId] = useState<string | null>(null)
 
   const previewRef = useRef<HTMLDivElement>(null)
   const previewTagElementsRef = useRef<Record<string, HTMLElement>>({})
   const replaceDocxInputRef = useRef<HTMLInputElement>(null)
   const tagComboRef = useRef<HTMLDivElement>(null)
+  const activeConditionalPreviewElementsRef = useRef<HTMLElement[]>([])
   /** После «Редактировать» не сбрасываем tagSlotId, если выделение в превью совпадает с тем же фрагментом. */
   const editSlotContextRef = useRef<{
     rawText: string
@@ -477,6 +483,10 @@ export default function DocumentEditPage() {
   const tid = templateId ?? ''
   const fields: FieldDef[] = useMemo(() => fieldRows.map(({ clientKey: _c, ...f }) => f), [fieldRows])
   const filteredTagFields = useMemo(() => filterFieldsByTagQuery(fields, tagInputValue), [fields, tagInputValue])
+  const visibleConditionalBlocks = useMemo(
+    () => conditionalBlocks.filter((b) => b.branch !== 'else'),
+    [conditionalBlocks],
+  )
 
   const insertTagBlockReason = useMemo(() => {
     const editingExistingSlot = Boolean(activeTagSlotId)
@@ -509,6 +519,24 @@ export default function DocumentEditPage() {
     [tid, versionId],
   )
 
+  const refreshConditionalBlocks = useCallback(
+    async (versionOverride?: string | null) => {
+      const vid = versionOverride ?? versionId
+      if (!tid || !vid) {
+        setConditionalBlocks([])
+        return
+      }
+      const r = await fetch(`${API_BASE}/templates/${tid}/versions/${vid}/conditional-blocks`)
+      if (!r.ok) {
+        setConditionalBlocks([])
+        return
+      }
+      const data = (await r.json()) as ConditionalBlock[]
+      setConditionalBlocks(Array.isArray(data) ? data : [])
+    },
+    [tid, versionId],
+  )
+
   const previewAnchorsWithSlots = useMemo(
     () => assignTagSlotsToAnchors(previewTagAnchors, tagSlots),
     [previewTagAnchors, tagSlots],
@@ -531,12 +559,14 @@ export default function DocumentEditPage() {
         className: 'docx-preview-root',
         inWrapper: true,
       })
+      activeConditionalPreviewElementsRef.current = []
       const collected = collectPreviewTagAnchors(el, fields)
       previewTagElementsRef.current = collected.elementsByKey
       setPreviewTagAnchors(collected.anchors)
     } catch {
       el.innerHTML =
         '<p class="preview-fallback">Не удалось отрисовать DOCX в браузере. Сохраните шаблон и скачайте результат.</p>'
+      activeConditionalPreviewElementsRef.current = []
       previewTagElementsRef.current = {}
       setPreviewTagAnchors([])
     }
@@ -571,6 +601,11 @@ export default function DocumentEditPage() {
     setSelectedOccurrenceIndex(null)
     setPreviewTagAnchors([])
     setTagSlots([])
+    setConditionalBlocks([])
+    setConditionalField('')
+    setConditionalEqualsValue('')
+    setEditingConditionalId(null)
+    setTemplateConfigMode('tags')
     setActiveTagSlotId(null)
     editSlotContextRef.current = null
     setRevertTarget(null)
@@ -626,7 +661,8 @@ export default function DocumentEditPage() {
   useEffect(() => {
     if (!tid || !versionId || loading) return
     void refreshTagSlots()
-  }, [tid, versionId, loading, refreshTagSlots])
+    void refreshConditionalBlocks()
+  }, [tid, versionId, loading, refreshTagSlots, refreshConditionalBlocks])
 
   useEffect(() => {
     if (!fields.length) return
@@ -665,10 +701,45 @@ export default function DocumentEditPage() {
     setTagComboHighlight((h) => Math.min(h, Math.max(0, filteredTagFields.length - 1)))
   }, [filteredTagFields.length, tagComboOpen])
 
+  const resetPreviewSelection = useCallback(() => {
+    setSelectedDocxText('')
+    setSelectedOccurrenceIndex(null)
+    setActiveTagSlotId(null)
+    editSlotContextRef.current = null
+    if (activeConditionalPreviewElementsRef.current.length > 0) {
+      for (const el of activeConditionalPreviewElementsRef.current) {
+        el.classList.remove('preview-conditional-hit-active')
+      }
+      activeConditionalPreviewElementsRef.current = []
+    }
+  }, [])
+
+  const resetTagSelectionAndEditState = useCallback(() => {
+    resetPreviewSelection()
+    setReplacementTemplate('')
+    setTagTargetId('')
+    setTagInputValue('')
+    setTagComboOpen(false)
+    setShowAdvancedComposer(false)
+  }, [resetPreviewSelection])
+
   const selectTagField = useCallback((f: FieldDef) => {
     setTagTargetId(f.id)
     setTagInputValue(`${f.label} (${f.id})`)
     setTagComboOpen(false)
+  }, [])
+
+  const toggleAdvancedComposer = useCallback(() => {
+    setShowAdvancedComposer((prev) => {
+      const next = !prev
+      if (next) {
+        // В «Полной форме» источник шаблона — textarea, не выбранный тег.
+        setTagTargetId('')
+        setTagInputValue('')
+        setTagComboOpen(false)
+      }
+      return next
+    })
   }, [])
 
   const commitTagInputFromValue = useCallback(() => {
@@ -866,6 +937,7 @@ export default function DocumentEditPage() {
     const ver = (detail.versions ?? []).find((x) => x.id === newVid)
     setPublished(ver?.status === 1)
     await refreshTagSlots(newVid)
+    await refreshConditionalBlocks(newVid)
     if (tab === 'design') await refreshPreview(detail.id, newVid)
   }
 
@@ -896,6 +968,7 @@ export default function DocumentEditPage() {
     setDocxReplacePanelOpen(false)
     await refreshTemplateDetailFromApi()
     await refreshTagSlots()
+    await refreshConditionalBlocks()
     if (tab === 'design') await refreshPreview(tid, versionId)
   }
 
@@ -1040,6 +1113,7 @@ export default function DocumentEditPage() {
       setActiveTagSlotId(null)
       editSlotContextRef.current = null
       await refreshTagSlots()
+      await refreshConditionalBlocks()
       if (tab === 'design') await refreshPreview(tid, versionId)
     } catch (e) {
       setMessage(e instanceof Error ? `Ошибка сети: ${e.message}` : 'Не удалось отправить запрос к серверу.')
@@ -1081,12 +1155,203 @@ export default function DocumentEditPage() {
       setActiveTagSlotId(null)
       editSlotContextRef.current = null
       await refreshTagSlots()
+      await refreshConditionalBlocks()
       if (tab === 'design') await refreshPreview(tid, versionId)
     } catch (e) {
       setMessage(e instanceof Error ? `Ошибка сети: ${e.message}` : 'Не удалось отправить запрос к серверу.')
     } finally {
       setIsApplyingTag(false)
     }
+  }
+
+  const resetConditionalEditor = useCallback(() => {
+    setEditingConditionalId(null)
+    setConditionalField('')
+    setConditionalEqualsValue('')
+  }, [])
+
+  const clearConditionalPreviewHighlight = useCallback(() => {
+    if (activeConditionalPreviewElementsRef.current.length === 0) return
+    for (const el of activeConditionalPreviewElementsRef.current) {
+      el.classList.remove('preview-conditional-hit-active')
+    }
+    activeConditionalPreviewElementsRef.current = []
+  }, [])
+
+  const highlightConditionalLocationInPreview = useCallback(
+    (block: ConditionalBlock) => {
+      const host = previewRef.current
+      if (!host) return
+      const normalizedBlock = normalizeTagFindText(block.findTemplate)
+      const candidateLines = normalizedBlock
+        .split('\n')
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length)
+      if (!candidateLines.length) return
+
+      const normalizeScan = (s: string) => normalizeTagFindText(s).replace(/\s+/g, ' ').trim().toLowerCase()
+      const normalizedFullNeedle = normalizeScan(normalizedBlock)
+      if (!normalizedFullNeedle) return
+
+      // Для docx-preview надежнее опираться на реальные текстовые блоки (абзацы/ячейки),
+      // а не на div-контейнеры, иначе можно отфильтровать все элементы.
+      const blockElements = Array.from(host.querySelectorAll<HTMLElement>('p, li, td, th')).filter((el) => {
+        const text = normalizeScan(el.innerText || el.textContent || '')
+        return Boolean(text)
+      })
+      if (blockElements.length === 0) return
+
+      const elementTexts = blockElements.map((el) => normalizeScan(el.innerText || el.textContent || ''))
+      const separator = ' '
+      const joined = elementTexts.join(separator)
+      if (!joined) return
+
+      let occurrenceHits = 0
+      let charIndex = -1
+      let searchFrom = 0
+      while (true) {
+        const found = joined.indexOf(normalizedFullNeedle, searchFrom)
+        if (found < 0) break
+        if (occurrenceHits === block.occurrenceIndex) {
+          charIndex = found
+          break
+        }
+        occurrenceHits += 1
+        searchFrom = found + Math.max(1, normalizedFullNeedle.length)
+      }
+      if (charIndex < 0) {
+        // fallback: по строкам. Берем элемент с максимальным числом совпавших строк.
+        const lineNeedles = candidateLines.map((x) => normalizeScan(x)).filter(Boolean)
+        if (!lineNeedles.length) return
+        let bestIdx = -1
+        let bestScore = 0
+        for (let i = 0; i < elementTexts.length; i += 1) {
+          const t = elementTexts[i]
+          let score = 0
+          for (const ln of lineNeedles) {
+            if (t.includes(ln)) score += 1
+          }
+          if (score > bestScore) {
+            bestScore = score
+            bestIdx = i
+          }
+        }
+        if (bestIdx < 0 || bestScore === 0) return
+        clearConditionalPreviewHighlight()
+        const el = blockElements[bestIdx]
+        el.classList.add('preview-conditional-hit-active')
+        activeConditionalPreviewElementsRef.current = [el]
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        return
+      }
+
+      const starts: number[] = []
+      const ends: number[] = []
+      let pos = 0
+      for (const txt of elementTexts) {
+        const start = pos
+        const end = start + txt.length
+        starts.push(start)
+        ends.push(end)
+        pos = end + separator.length
+      }
+      const matchStart = charIndex
+      const matchEnd = charIndex + normalizedFullNeedle.length
+
+      let startIdx = 0
+      while (startIdx < starts.length && ends[startIdx] <= matchStart) startIdx += 1
+      let endIdx = startIdx
+      while (endIdx < starts.length && starts[endIdx] < matchEnd) endIdx += 1
+      endIdx = Math.max(startIdx, endIdx - 1)
+
+      clearConditionalPreviewHighlight()
+      const selected = blockElements.slice(startIdx, endIdx + 1)
+      for (const el of selected) {
+        el.classList.add('preview-conditional-hit-active')
+      }
+      activeConditionalPreviewElementsRef.current = selected
+      selected[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    },
+    [clearConditionalPreviewHighlight],
+  )
+
+  const createOrUpdateConditionalBlock = async () => {
+    if (!tid || !versionId) return
+    if (!selectedDocxText.trim() && !editingConditionalId) {
+      setMessage('Сначала выделите фрагмент в предпросмотре для условного блока.')
+      return
+    }
+    if (selectedOccurrenceIndex == null) {
+      setMessage('Не удалось определить позицию выделения для условного блока.')
+      return
+    }
+    if (!conditionalField.trim()) {
+      setMessage('Выберите поле для условия.')
+      return
+    }
+    const normalizedSelection = normalizeTagFindText(selectedDocxText).trim()
+    const payload = {
+      findTemplate: normalizedSelection,
+      occurrenceIndex: selectedOccurrenceIndex as number,
+      conditionField: conditionalField.trim(),
+      equalsValue: conditionalEqualsValue,
+      branch: 'if',
+      elseGroupId: null,
+    }
+    const isEdit = Boolean(editingConditionalId)
+    const endpoint = isEdit
+      ? `${API_BASE}/templates/${tid}/versions/${versionId}/conditional-blocks/${editingConditionalId}`
+      : `${API_BASE}/templates/${tid}/versions/${versionId}/conditional-blocks`
+    const method = isEdit ? 'PATCH' : 'POST'
+    const r = await fetch(endpoint, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const raw = await r.text()
+    if (!r.ok) {
+      setMessage(parseLoadErrorText(raw))
+      return
+    }
+    setPublished(false)
+    setMessage(isEdit ? 'Условный блок обновлен.' : 'Условный блок создан.')
+    await refreshConditionalBlocks()
+    resetConditionalEditor()
+  }
+
+  const deleteConditionalBlock = async (id: string) => {
+    if (!tid || !versionId) return
+    const r = await fetch(`${API_BASE}/templates/${tid}/versions/${versionId}/conditional-blocks/${id}`, {
+      method: 'DELETE',
+    })
+    const raw = await r.text()
+    if (!r.ok) {
+      setMessage(parseLoadErrorText(raw))
+      return
+    }
+    setPublished(false)
+    setMessage('Условный блок удален.')
+    clearConditionalPreviewHighlight()
+    if (editingConditionalId === id) resetConditionalEditor()
+    await refreshConditionalBlocks()
+  }
+
+  const beginEditConditionalBlock = (block: ConditionalBlock) => {
+    setEditingConditionalId(block.id)
+    setConditionalField(block.conditionField)
+    setConditionalEqualsValue(block.equalsValue)
+    setSelectedDocxText(block.findTemplate)
+    setSelectedOccurrenceIndex(block.occurrenceIndex)
+    highlightConditionalLocationInPreview(block)
+    setMessage('Режим редактирования условного блока. При необходимости скорректируйте поле/значение и сохраните.')
+  }
+
+  const jumpToConditionalBlock = (block: ConditionalBlock) => {
+    setSelectedDocxText(block.findTemplate)
+    setSelectedOccurrenceIndex(block.occurrenceIndex)
+    highlightConditionalLocationInPreview(block)
+    setMessage('Фрагмент условного блока подсвечен в предпросмотре.')
   }
 
   const scrollToPreviewTag = (key: string) => {
@@ -1157,6 +1422,7 @@ export default function DocumentEditPage() {
     setTagTargetId('')
     setTagInputValue('')
     setTagComboOpen(false)
+    setTagInsertPanelOpen(true)
     setShowAdvancedComposer(true)
     scrollToPreviewTag(anchor.key)
     setMessage(
@@ -1400,194 +1666,322 @@ export default function DocumentEditPage() {
           </section>
 
           <section className="card">
-            <h2>Предпросмотр шаблона</h2>
+            <h2>Настройка шаблона</h2>
             {isBinaryDocxMode && (
               <>
-                <div className="preview-tag-toolbar">
-                  <label className="preview-tag-toolbar-text">
-                    <span className="preview-selected-text-header">
-                      <span>Выделенный текст</span>
-                      <button
-                        type="button"
-                        className="btn-text"
-                        disabled={!selectedDocxText.trim()}
-                        onClick={() => {
-                          setSelectedDocxText('')
-                          setSelectedOccurrenceIndex(null)
-                          setActiveTagSlotId(null)
-                          editSlotContextRef.current = null
-                        }}
-                      >
-                        Сбросить
-                      </button>
-                    </span>
-                    <textarea
-                      className="preview-selected-docx-text"
-                      value={selectedDocxText}
-                      readOnly
-                      rows={3}
-                      onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
-                        if (e.key !== 'Backspace' && e.key !== 'Delete') return
-                        if (!selectedDocxText) return
-                        e.preventDefault()
-                        setSelectedDocxText('')
-                        setSelectedOccurrenceIndex(null)
-                        setActiveTagSlotId(null)
-                        editSlotContextRef.current = null
-                      }}
-                      placeholder="Выделите фрагмент в документе"
-                      spellCheck={false}
-                      autoComplete="off"
-                      title="Backspace или Delete — очистить выделение целиком"
-                    />
-                  </label>
-                  <label className="tag-field-combobox-label">
-                    Тег
-                    <div className="tag-field-combobox" ref={tagComboRef}>
-                      <input
-                        type="text"
-                        role="combobox"
-                        aria-expanded={tagComboOpen}
-                        aria-controls={tagComboOpen ? 'tag-field-combobox-listbox' : undefined}
-                        aria-autocomplete="list"
-                        value={tagInputValue}
-                        onChange={(e) => {
-                          setTagInputValue(e.target.value)
-                          setTagComboHighlight(0)
-                          setTagComboOpen(true)
-                        }}
-                        onFocus={() => {
-                          setTagComboOpen(true)
-                          setTagComboHighlight(0)
-                        }}
-                        onBlur={onTagComboBlur}
-                        onKeyDown={onTagComboKeyDown}
-                        placeholder={
-                          fields.length
-                            ? 'Поиск по id или подписи…'
-                            : 'Введите id тега (латиница, цифры, _) или добавьте поля на вкладке «Поля»'
-                        }
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                      {tagComboOpen && fields.length > 0 ? (
-                        <div
-                          className="tag-field-combobox-dropdown"
-                          id="tag-field-combobox-listbox"
-                          role="listbox"
-                        >
-                          {filteredTagFields.length === 0 ? (
-                            <div className="tag-mention-empty">Ничего не найдено</div>
-                          ) : (
-                            filteredTagFields.map((f, i) => (
-                              <button
-                                key={f.id}
-                                type="button"
-                                role="option"
-                                className={`tag-mention-item${i === tagComboHighlight ? ' active' : ''}`}
-                                onMouseDown={(ev) => ev.preventDefault()}
-                                onClick={() => selectTagField(f)}
-                              >
-                                <span>{f.label}</span>
-                                <code>{f.id}</code>
-                              </button>
-                            ))
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                  </label>
+                <div className="template-mode-toggle" role="radiogroup" aria-label="Режим настройки шаблона">
                   <button
                     type="button"
-                    onClick={() => void applyTagInDocx()}
-                    disabled={insertTagDisabled}
-                    title={
-                      insertTagBlockReason ??
-                      (isApplyingTag ? 'Отправка запроса…' : 'Подставить шаблон в DOCX по выделенному тексту')
-                    }
+                    role="radio"
+                    aria-checked={templateConfigMode === 'tags'}
+                    className={templateConfigMode === 'tags' ? 'template-mode-toggle-btn active' : 'template-mode-toggle-btn'}
+                    onClick={() => setTemplateConfigMode('tags')}
                   >
-                    {isApplyingTag ? 'Применение…' : 'Вставить тег'}
+                    Теги
                   </button>
-                  <button type="button" className="btn-secondary" onClick={() => setShowAdvancedComposer((v) => !v)}>
-                    {showAdvancedComposer ? 'Короткая форма' : 'Полная форма'}
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={templateConfigMode === 'conditional'}
+                    className={templateConfigMode === 'conditional' ? 'template-mode-toggle-btn active' : 'template-mode-toggle-btn'}
+                    onClick={() => setTemplateConfigMode('conditional')}
+                  >
+                    Условные блоки
                   </button>
-                  <span className="hint">
-                    {selectedOccurrenceIndex == null ? 'Выделите текст в предпросмотре.' : `Позиция: ${selectedOccurrenceIndex + 1}-е вхождение.`}
-                  </span>
                 </div>
-                {showAdvancedComposer && (
-                  <div className="preview-tag-composer">
-                    <label>
-                      Шаблон вставки
-                      <textarea
-                        className="composite-template-textarea"
-                        value={replacementTemplate}
-                        onChange={(e) => setReplacementTemplate(e.target.value)}
-                        placeholder={'{{buyer_name}}\\n{{buyer_inn}}'}
-                        spellCheck={false}
-                      />
-                    </label>
-                    <p className="hint">
-                      Свободный текст и поля <code>{'{{id}}'}</code>. Обычный слэш <code>/</code> или дефис — просто символы в тексте, они{' '}
-                      <strong>не</strong> делают перенос строки. Перенос внутри абзаца в Word — только два символа: обратный слэш и{' '}
-                      <code>n</code> (<code>{'\\n'}</code> в строке). Новый абзац: <code>{PARA_BREAK_MARKER}</code>.
-                    </p>
+                {templateConfigMode === 'tags' && (
+                  <div className="template-mode-panel">
+                    <div className="preview-tag-toolbar">
+                      <label className="preview-tag-toolbar-text">
+                        <span className="preview-selected-text-header">
+                          <span>Выделенный текст</span>
+                          <button
+                            type="button"
+                            className="btn-text"
+                            disabled={!selectedDocxText.trim()}
+                            onClick={resetTagSelectionAndEditState}
+                          >
+                            Сбросить
+                          </button>
+                        </span>
+                        <textarea
+                          className="preview-selected-docx-text"
+                          value={selectedDocxText}
+                          readOnly
+                          rows={3}
+                          onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
+                            if (e.key !== 'Backspace' && e.key !== 'Delete') return
+                            if (!selectedDocxText) return
+                            e.preventDefault()
+                            resetTagSelectionAndEditState()
+                          }}
+                          placeholder="Выделите фрагмент в документе"
+                          spellCheck={false}
+                          autoComplete="off"
+                          title="Backspace или Delete — очистить выделение целиком"
+                        />
+                      </label>
+                      <label className="tag-field-combobox-label">
+                        Тег
+                        <div className="tag-field-combobox" ref={tagComboRef}>
+                          <input
+                            type="text"
+                            role="combobox"
+                            aria-expanded={tagComboOpen}
+                            aria-controls={tagComboOpen ? 'tag-field-combobox-listbox' : undefined}
+                            aria-autocomplete="list"
+                            value={tagInputValue}
+                            onChange={(e) => {
+                              setTagInputValue(e.target.value)
+                              setTagComboHighlight(0)
+                              setTagComboOpen(true)
+                            }}
+                            onFocus={() => {
+                              setTagComboOpen(true)
+                              setTagComboHighlight(0)
+                            }}
+                            onBlur={onTagComboBlur}
+                            onKeyDown={onTagComboKeyDown}
+                            placeholder={
+                              fields.length
+                                ? 'Поиск по id или подписи…'
+                                : 'Введите id тега (латиница, цифры, _) или добавьте поля на вкладке «Поля»'
+                            }
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                          {tagComboOpen && fields.length > 0 ? (
+                            <div
+                              className="tag-field-combobox-dropdown"
+                              id="tag-field-combobox-listbox"
+                              role="listbox"
+                            >
+                              {filteredTagFields.length === 0 ? (
+                                <div className="tag-mention-empty">Ничего не найдено</div>
+                              ) : (
+                                filteredTagFields.map((f, i) => (
+                                  <button
+                                    key={f.id}
+                                    type="button"
+                                    role="option"
+                                    className={`tag-mention-item${i === tagComboHighlight ? ' active' : ''}`}
+                                    onMouseDown={(ev) => ev.preventDefault()}
+                                    onClick={() => selectTagField(f)}
+                                  >
+                                    <span>{f.label}</span>
+                                    <code>{f.id}</code>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void applyTagInDocx()}
+                        disabled={insertTagDisabled}
+                        title={
+                          insertTagBlockReason ??
+                          (isApplyingTag ? 'Отправка запроса…' : 'Подставить шаблон в DOCX по выделенному тексту')
+                        }
+                      >
+                        {isApplyingTag ? 'Применение…' : 'Вставить тег'}
+                      </button>
+                      <button type="button" className="btn-secondary" onClick={toggleAdvancedComposer}>
+                        {showAdvancedComposer ? 'Короткая форма' : 'Полная форма'}
+                      </button>
+                      <span className="hint">
+                        {selectedOccurrenceIndex == null ? 'Выделите текст в предпросмотре.' : `Позиция: ${selectedOccurrenceIndex + 1}-е вхождение.`}
+                      </span>
+                    </div>
+                    {showAdvancedComposer && (
+                      <div className="preview-tag-composer">
+                        <label>
+                          Шаблон вставки
+                          <textarea
+                            className="composite-template-textarea"
+                            value={replacementTemplate}
+                            onChange={(e) => setReplacementTemplate(e.target.value)}
+                            placeholder={'{{buyer_name}}\\n{{buyer_inn}}'}
+                            spellCheck={false}
+                          />
+                        </label>
+                        <p className="hint">
+                          Свободный текст и поля <code>{'{{id}}'}</code>. Обычный слэш <code>/</code> или дефис — просто символы в тексте, они{' '}
+                          <strong>не</strong> делают перенос строки. Перенос внутри абзаца в Word — только два символа: обратный слэш и{' '}
+                          <code>n</code> (<code>{'\\n'}</code> в строке). Новый абзац: <code>{PARA_BREAK_MARKER}</code>.
+                        </p>
+                      </div>
+                    )}
+                    <div className="preview-tag-list">
+                      <div className="preview-tag-list-header">
+                        <h3>Добавленные теги</h3>
+                        <span className="hint">
+                          {previewAnchorsWithSlots.length > 0 ? `${previewAnchorsWithSlots.length} шт.` : 'Пока не найдены'}
+                        </span>
+                      </div>
+                      {previewAnchorsWithSlots.length > 0 ? (
+                        <div className="preview-tag-list-items">
+                          {previewAnchorsWithSlots.map((anchor) => (
+                            <div key={anchor.key} className="preview-tag-list-row">
+                              <button
+                                type="button"
+                                className="preview-tag-list-item"
+                                onClick={() => scrollToPreviewTag(anchor.key)}
+                              >
+                                <span>{anchor.label}</span>
+                                <span className="preview-tag-codes">
+                                  {anchor.tagIds.map((id) => (
+                                    <code key={`${anchor.key}-${id}`}>{`{{${id}}}`}</code>
+                                  ))}
+                                </span>
+                                {anchor.isComposite ? (
+                                  <span className="hint preview-tag-composite-badge">составной</span>
+                                ) : null}
+                                <span className="hint">#{anchor.occurrence}</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary preview-tag-edit-btn"
+                                onClick={() => void beginEditAnchor(anchor)}
+                              >
+                                Редактировать
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-text btn-danger preview-tag-delete-btn"
+                                disabled={!anchor.tagSlotId || isApplyingTag}
+                                title={
+                                  anchor.tagSlotId
+                                    ? 'Восстановить исходный текст из документа'
+                                    : 'Нет данных для восстановления — вставьте тег после обновления страницы'
+                                }
+                                onClick={() => setRevertTarget(anchor)}
+                              >
+                                Удалить тег
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="hint">После вставки тегов здесь появится список переходов по документу.</p>
+                      )}
+                    </div>
                   </div>
                 )}
-                <div className="preview-tag-list">
-                  <div className="preview-tag-list-header">
-                    <h3>Добавленные теги</h3>
-                    <span className="hint">
-                      {previewAnchorsWithSlots.length > 0 ? `${previewAnchorsWithSlots.length} шт.` : 'Пока не найдены'}
-                    </span>
-                  </div>
-                  {previewAnchorsWithSlots.length > 0 ? (
-                    <div className="preview-tag-list-items">
-                      {previewAnchorsWithSlots.map((anchor) => (
-                        <div key={anchor.key} className="preview-tag-list-row">
+                {templateConfigMode === 'conditional' && (
+                  <div className="template-mode-panel">
+                    <div className="preview-tag-toolbar">
+                      <label className="preview-tag-toolbar-text">
+                        <span className="preview-selected-text-header">
+                          <span>Выделенный текст для условного блока</span>
                           <button
                             type="button"
-                            className="preview-tag-list-item"
-                            onClick={() => scrollToPreviewTag(anchor.key)}
+                            className="btn-text"
+                            disabled={!selectedDocxText.trim()}
+                            onClick={resetPreviewSelection}
                           >
-                            <span>{anchor.label}</span>
-                            <span className="preview-tag-codes">
-                              {anchor.tagIds.map((id) => (
-                                <code key={`${anchor.key}-${id}`}>{`{{${id}}}`}</code>
-                              ))}
-                            </span>
-                            {anchor.isComposite ? (
-                              <span className="hint preview-tag-composite-badge">составной</span>
-                            ) : null}
-                            <span className="hint">#{anchor.occurrence}</span>
+                            Сбросить
                           </button>
-                          <button
-                            type="button"
-                            className="btn-secondary preview-tag-edit-btn"
-                            onClick={() => void beginEditAnchor(anchor)}
-                          >
-                            Редактировать
-                          </button>
-                          <button
-                            type="button"
-                            className="btn-text btn-danger preview-tag-delete-btn"
-                            disabled={!anchor.tagSlotId || isApplyingTag}
-                            title={
-                              anchor.tagSlotId
-                                ? 'Восстановить исходный текст из документа'
-                                : 'Нет данных для восстановления — вставьте тег после обновления страницы'
-                            }
-                            onClick={() => setRevertTarget(anchor)}
-                          >
-                            Удалить тег
-                          </button>
-                        </div>
-                      ))}
+                        </span>
+                        <textarea
+                          className="preview-selected-docx-text"
+                          value={selectedDocxText}
+                          readOnly
+                          rows={3}
+                          placeholder="Выделите фрагмент в документе"
+                          spellCheck={false}
+                          autoComplete="off"
+                        />
+                      </label>
+                      <span className="hint">
+                        {selectedOccurrenceIndex == null ? 'Выделите текст в предпросмотре.' : `Позиция: ${selectedOccurrenceIndex + 1}-е вхождение.`}
+                      </span>
                     </div>
-                  ) : (
-                    <p className="hint">После вставки тегов здесь появится список переходов по документу.</p>
-                  )}
-                </div>
+                    <div className="preview-tag-list conditional-blocks-panel">
+                      <div className="preview-tag-list-header">
+                        <h3>Условные блоки</h3>
+                        <span className="hint">
+                          {visibleConditionalBlocks.length > 0 ? `${visibleConditionalBlocks.length} шт.` : 'Пока не созданы'}
+                        </span>
+                      </div>
+                      <div className="conditional-block-editor">
+                        <label>
+                          Поле
+                          <select
+                            value={conditionalField}
+                            onChange={(e) => setConditionalField(e.target.value)}
+                          >
+                            <option value="">Выберите поле…</option>
+                            {fields.map((f) => (
+                              <option key={`cond-field-${f.id}`} value={f.id}>
+                                {f.label} ({f.id})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Значение равно
+                          <input
+                            type="text"
+                            value={conditionalEqualsValue}
+                            onChange={(e) => setConditionalEqualsValue(e.target.value)}
+                            placeholder="например: 1"
+                          />
+                        </label>
+                        <div className="row">
+                          <button type="button" onClick={() => void createOrUpdateConditionalBlock()}>
+                            {editingConditionalId ? 'Сохранить условный блок' : 'Создать условный блок из выделения'}
+                          </button>
+                          {editingConditionalId ? (
+                            <button type="button" className="btn-secondary" onClick={resetConditionalEditor}>
+                              Отмена редактирования
+                            </button>
+                          ) : null}
+                        </div>
+                        <p className="hint">
+                          1) Выделите нужный фрагмент в документе. 2) Выберите поле и значение. 3) Нажмите кнопку создания.
+                          Блок остается в результате, только если <code>payload[field] == value</code>.
+                        </p>
+                      </div>
+                      {visibleConditionalBlocks.length > 0 ? (
+                        <div className="preview-tag-list-items">
+                          {visibleConditionalBlocks.map((b) => (
+                            <div key={b.id} className="preview-tag-list-row">
+                              <button
+                                type="button"
+                                className="preview-tag-list-item"
+                                onClick={() => jumpToConditionalBlock(b)}
+                              >
+                                <span>
+                                  {b.conditionField} == {b.equalsValue || '""'}
+                                </span>
+                                <span className="hint">#{b.occurrenceIndex + 1}</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary preview-tag-edit-btn"
+                                onClick={() => beginEditConditionalBlock(b)}
+                              >
+                                Редактировать
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-text btn-danger preview-tag-delete-btn"
+                                onClick={() => void deleteConditionalBlock(b.id)}
+                              >
+                                Удалить
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="hint">Список появится после создания первого условия.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
             )}
             <div ref={previewRef} className="docx-preview-mount" onMouseUp={captureSelectionFromPreview} />

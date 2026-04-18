@@ -78,9 +78,38 @@ def _deserialize_tag_slot(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _serialize_conditional_block(b: dict[str, Any]) -> dict[str, Any]:
+    group = b.get("else_group_id")
+    return {
+        "id": str(b["id"]),
+        "find_template": b["find_template"],
+        "occurrence_index": b["occurrence_index"],
+        "condition_field": b["condition_field"],
+        "equals_value": b["equals_value"],
+        "branch": b.get("branch", "if"),
+        "else_group_id": str(group) if group else None,
+        "created_at_utc": _dt_serialize(b.get("created_at_utc")),
+    }
+
+
+def _deserialize_conditional_block(d: dict[str, Any]) -> dict[str, Any]:
+    group_raw = d.get("else_group_id")
+    return {
+        "id": uuid.UUID(d["id"]),
+        "find_template": d.get("find_template", ""),
+        "occurrence_index": int(d.get("occurrence_index", 0)),
+        "condition_field": d.get("condition_field", ""),
+        "equals_value": d.get("equals_value", ""),
+        "branch": d.get("branch", "if"),
+        "else_group_id": uuid.UUID(group_raw) if group_raw else None,
+        "created_at_utc": _dt_parse(d.get("created_at_utc")) if d.get("created_at_utc") else datetime.now(timezone.utc),
+    }
+
+
 def _serialize_version(v: dict[str, Any]) -> dict[str, Any]:
     b = v.get("docx_bytes")
     slots = v.get("tag_slots") or []
+    blocks = v.get("conditional_blocks") or []
     return {
         "id": str(v["id"]),
         "template_id": str(v["template_id"]),
@@ -94,6 +123,7 @@ def _serialize_version(v: dict[str, Any]) -> dict[str, Any]:
         "docx_bytes_b64": base64.standard_b64encode(b).decode("ascii") if b else None,
         "source_file_name": v.get("source_file_name"),
         "tag_slots": [_serialize_tag_slot(s) for s in slots],
+        "conditional_blocks": [_serialize_conditional_block(x) for x in blocks],
     }
 
 
@@ -107,6 +137,12 @@ def _deserialize_version(d: dict[str, Any]) -> dict[str, Any]:
         for item in raw_slots:
             if isinstance(item, dict):
                 tag_slots.append(_deserialize_tag_slot(item))
+    raw_blocks = d.get("conditional_blocks")
+    conditional_blocks: list[dict[str, Any]] = []
+    if isinstance(raw_blocks, list):
+        for item in raw_blocks:
+            if isinstance(item, dict):
+                conditional_blocks.append(_deserialize_conditional_block(item))
     return {
         "id": uuid.UUID(d["id"]),
         "template_id": uuid.UUID(str(d["template_id"])),
@@ -120,6 +156,7 @@ def _deserialize_version(d: dict[str, Any]) -> dict[str, Any]:
         "docx_bytes": raw,
         "source_file_name": d.get("source_file_name"),
         "tag_slots": tag_slots,
+        "conditional_blocks": conditional_blocks,
     }
 
 

@@ -25,6 +25,17 @@ export type TagSlot = {
   createdAtUtc?: string | null
 }
 
+export type ConditionalBlock = {
+  id: string
+  findTemplate: string
+  occurrenceIndex: number
+  conditionField: string
+  equalsValue: string
+  branch: 'if' | 'else'
+  elseGroupId?: string | null
+  createdAtUtc?: string | null
+}
+
 export type TemplateDetail = {
   id: string
   name: string

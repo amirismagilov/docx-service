@@ -6,6 +6,7 @@ import io
 import re
 import zipfile
 from datetime import datetime, timezone
+from typing import Any
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -508,6 +509,131 @@ def apply_docx_single_text_replacement(docx_bytes: bytes, find_text: str, replac
     return buf_out.getvalue(), replaced_any
 
 
+def _normalize_fragment_for_matching(s: str) -> str:
+    s = norm_tag_fragment(s)
+    s = re.sub(r"[^\S\r\n]*\n[^\S\r\n]*", "\n", s)
+    s = re.sub(r"\n{2,}", "\n", s)
+    return s.strip()
+
+
+def _remove_nth_large_fragment_in_word_xml(xml_bytes: bytes, find_text: str, occurrence_index: int) -> tuple[bytes, bool]:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return xml_bytes, False
+
+    paragraphs = root.findall(".//w:p", NS)
+    if not paragraphs:
+        return xml_bytes, False
+
+    para_norm: list[str] = [_normalize_fragment_for_matching(_paragraph_logical_text(p)) for p in paragraphs]
+    joined = "\n".join(para_norm)
+    needle = _normalize_fragment_for_matching(find_text)
+    if not joined or not needle:
+        return xml_bytes, False
+
+    spans = _find_all_spans(joined, needle)
+    if occurrence_index < 0 or occurrence_index >= len(spans):
+        return xml_bytes, False
+    target_start, target_end = spans[occurrence_index]
+
+    para_char_spans: list[tuple[int, int]] = []
+    cursor = 0
+    for idx, txt in enumerate(para_norm):
+        start = cursor
+        end = start + len(txt)
+        para_char_spans.append((start, end))
+        cursor = end + (1 if idx < len(para_norm) - 1 else 0)
+
+    remove_indices: list[int] = []
+    for i, (start, end) in enumerate(para_char_spans):
+        intersects = start < target_end and end > target_start
+        if intersects:
+            remove_indices.append(i)
+    if not remove_indices:
+        return xml_bytes, False
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    removed_any = False
+    for i in reversed(remove_indices):
+        p = paragraphs[i]
+        parent = parent_map.get(p)
+        if parent is None:
+            continue
+        parent.remove(p)
+        removed_any = True
+    if not removed_any:
+        return xml_bytes, False
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True), True
+
+
+def remove_docx_fragment(docx_bytes: bytes, find_text: str, occurrence_index: int) -> tuple[bytes, bool]:
+    """
+    Удаляет N-е вхождение фрагмента:
+    1) сначала точечной заменой (работает для небольших фрагментов),
+    2) затем fallback для больших многоабзацных фрагментов.
+    """
+    updated, ok = apply_docx_single_text_replacement(docx_bytes, find_text, "", occurrence_index)
+    if ok:
+        return updated, True
+
+    buf_in = io.BytesIO(docx_bytes)
+    infos: list[zipfile.ZipInfo] = []
+    raw_by_fn: dict[str, bytes] = {}
+    with zipfile.ZipFile(buf_in, "r") as zin:
+        infos = zin.infolist()
+        for zi in infos:
+            fn = zi.filename.replace("\\", "/")
+            raw_by_fn[fn] = zin.read(zi.filename)
+
+    word_xml_fns = sorted(
+        [fn for fn in raw_by_fn if fn.startswith("word/") and fn.endswith(".xml")],
+        key=_word_xml_sort_key,
+    )
+
+    global_seen = 0
+    modified_fn: str | None = None
+    for fn in word_xml_fns:
+        raw = raw_by_fn[fn]
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+        paragraphs = root.findall(".//w:p", NS)
+        if not paragraphs:
+            continue
+        para_norm = [_normalize_fragment_for_matching(_paragraph_logical_text(p)) for p in paragraphs]
+        joined = "\n".join(para_norm)
+        needle = _normalize_fragment_for_matching(find_text)
+        if not joined or not needle:
+            continue
+        spans = _find_all_spans(joined, needle)
+        local_count = len(spans)
+        if local_count == 0:
+            continue
+        if occurrence_index < global_seen or occurrence_index >= global_seen + local_count:
+            global_seen += local_count
+            continue
+        local_idx = occurrence_index - global_seen
+        updated_xml, local_ok = _remove_nth_large_fragment_in_word_xml(raw, find_text, local_idx)
+        if not local_ok:
+            return docx_bytes, False
+        raw_by_fn[fn] = updated_xml
+        modified_fn = fn
+        break
+
+    if modified_fn is None:
+        return docx_bytes, False
+
+    buf_out = io.BytesIO()
+    with zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for zi in infos:
+            fn = zi.filename.replace("\\", "/")
+            raw = raw_by_fn[fn]
+            zout.writestr(zi, raw, compress_type=zipfile.ZIP_DEFLATED)
+    return buf_out.getvalue(), True
+
+
 def merge_docx_placeholders(docx_bytes: bytes, values: dict[str, str]) -> tuple[str, bytes]:
     """
     Подставляет значения в плейсхолдеры вида {{field_id}} во всех word/*.xml.
@@ -522,6 +648,53 @@ def merge_docx_placeholders(docx_bytes: bytes, values: dict[str, str]) -> tuple[
     return f"dkp-{ts}.docx", merged
 
 
+def apply_docx_conditional_blocks(docx_bytes: bytes, payload: dict[str, Any], blocks: list[dict[str, Any]]) -> tuple[bytes, list[str]]:
+    """
+    Применяет условные блоки к DOCX:
+    - branch=if: блок видим, если payload[field] == equals_value (case-insensitive)
+    - branch=else: блок видим, если условие НЕ выполняется
+    Невидимые блоки удаляются заменой на пустую строку по (find_template, occurrence_index).
+    """
+    if not blocks:
+        return docx_bytes, []
+    out = docx_bytes
+    warnings: list[str] = []
+
+    by_template: dict[str, list[dict[str, Any]]] = {}
+    for b in blocks:
+        tpl = str(b.get("find_template") or "")
+        if not tpl:
+            continue
+        by_template.setdefault(tpl, []).append(b)
+
+    for template, group in by_template.items():
+        to_delete = []
+        for b in group:
+            field = str(b.get("condition_field") or "")
+            equals_value = str(b.get("equals_value") or "")
+            branch = str(b.get("branch") or "if").lower()
+            incoming = payload.get(field)
+            cond_ok = incoming is not None and str(incoming).lower() == equals_value.lower()
+            visible = cond_ok if branch != "else" else (not cond_ok)
+            if visible:
+                continue
+            occ = b.get("occurrence_index")
+            if not isinstance(occ, int) or occ < 0:
+                warnings.append(f"block:{b.get('id')} invalid occurrence_index")
+                continue
+            to_delete.append((occ, b))
+
+        # Удаляем с конца, чтобы не сдвигать индексы оставшихся вхождений того же шаблона.
+        to_delete.sort(key=lambda x: x[0], reverse=True)
+        for occ, b in to_delete:
+            updated, ok = remove_docx_fragment(out, template, occ)
+            if ok:
+                out = updated
+            else:
+                warnings.append(f"block:{b.get('id')} stale or not found")
+    return out, warnings
+
+
 def render_version_to_docx(
     *,
     docx_bytes: bytes | None,
@@ -529,6 +702,7 @@ def render_version_to_docx(
     bindings_json: str,
     rules_json: str,
     payload_json: str,
+    conditional_blocks: list[dict[str, Any]] | None = None,
 ) -> tuple[str, bytes]:
     """Объединяет логику: бинарный шаблон или текстовый legacy."""
     if docx_bytes:
@@ -537,7 +711,10 @@ def render_version_to_docx(
         payload = json.loads(payload_json) if payload_json else {}
         if not isinstance(payload, dict):
             payload = {}
+        docx_in = docx_bytes
+        if conditional_blocks:
+            docx_in, _warnings = apply_docx_conditional_blocks(docx_in, payload, conditional_blocks)
         flat = {str(k): "" if v is None else str(v) for k, v in payload.items()}
-        return merge_docx_placeholders(docx_bytes, flat)
+        return merge_docx_placeholders(docx_in, flat)
     result = generate_docx(docx_template_body, bindings_json, rules_json, payload_json)
     return result.file_name, result.bytes_

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5175",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0 --port 5175"
+    "preview": "vite preview --host 0.0.0.0 --port 5175",
+    "pw:manual:composite": "node scripts/playwright_manual_composite_check.mjs",
+    "pw:manual:conditional": "node scripts/playwright_manual_conditional_blocks_check.mjs"
   },
   "dependencies": {
     "docx": "^9.6.1",
