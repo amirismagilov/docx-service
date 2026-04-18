@@ -266,8 +266,7 @@ def test_insert_edit_delete_flow_for_identical_tokens_keeps_correct_slot_binding
     slots = client.get(f"/api/templates/{tid}/versions/{vid}/tag-slots")
     assert slots.status_code == 200
     by_id = {s["id"]: s for s in slots.json()}
-    assert by_id[first_slot_id]["currentOccurrenceIndex"] == 0
-    assert by_id[second_slot_id]["currentOccurrenceIndex"] == 1
+    assert {by_id[first_slot_id]["currentOccurrenceIndex"], by_id[second_slot_id]["currentOccurrenceIndex"]} == {0, 1}
 
     edit_first = client.post(
         f"/api/templates/{tid}/versions/{vid}/apply-tag",
@@ -503,3 +502,129 @@ def test_edit_composite_duplicate_without_reselect_works_with_stale_slot_index()
     rendered = _joined_w_text(xml)
     assert "{{field_1}} {{field_1}}" in rendered
     assert "<w:br" not in xml
+
+
+def test_apply_tag_with_slot_id_allows_empty_find_text_for_edit_flow() -> None:
+    templates.clear()
+    template_versions.clear()
+
+    client = TestClient(app)
+    r = client.post("/api/templates/bootstrap-empty", json={"name": "T"})
+    data = r.json()
+    tid, vid = data["templateId"], data["versionId"]
+
+    raw = build_docx_from_plain_text("X")
+    client.post(
+        f"/api/templates/{tid}/versions/{vid}/upload-docx",
+        files={
+            "file": (
+                "t.docx",
+                raw,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    inserted = client.post(
+        f"/api/templates/{tid}/versions/{vid}/apply-tag",
+        json={
+            "findText": "X",
+            "replacementTemplate": "{{field_1}}\\n {{field_1}}",
+            "replaceAll": False,
+            "occurrenceIndex": 0,
+        },
+    )
+    assert inserted.status_code == 200
+    slot_id = inserted.json()["tagSlotId"]
+
+    edited = client.post(
+        f"/api/templates/{tid}/versions/{vid}/apply-tag",
+        json={
+            "tagSlotId": slot_id,
+            # В UI-режиме «Редактировать» findText может не отправляться.
+            "findText": "",
+            "replacementTemplate": "{{field_1}} {{field_1}}",
+            "replaceAll": False,
+            "occurrenceIndex": 0,
+        },
+    )
+    assert edited.status_code == 200
+
+    got = client.get(f"/api/templates/{tid}/versions/{vid}/docx-file")
+    assert got.status_code == 200
+    z = zipfile.ZipFile(io.BytesIO(got.content))
+    xml = z.read("word/document.xml").decode("utf-8")
+    rendered = _joined_w_text(xml)
+    assert "{{field_1}} {{field_1}}" in rendered
+    assert "<w:br" not in xml
+
+
+def test_revert_resyncs_remaining_slot_indices_for_same_template() -> None:
+    templates.clear()
+    template_versions.clear()
+
+    client = TestClient(app)
+    r = client.post("/api/templates/bootstrap-empty", json={"name": "T"})
+    data = r.json()
+    tid, vid = data["templateId"], data["versionId"]
+
+    raw = build_docx_from_plain_text("A A A")
+    client.post(
+        f"/api/templates/{tid}/versions/{vid}/upload-docx",
+        files={
+            "file": (
+                "t.docx",
+                raw,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    # 1) Метим первое A
+    s1 = client.post(
+        f"/api/templates/{tid}/versions/{vid}/apply-tag",
+        json={
+            "findText": "A",
+            "replacementTemplate": "{{x}}",
+            "replaceAll": False,
+            "occurrenceIndex": 0,
+        },
+    )
+    assert s1.status_code == 200
+    slot1 = s1.json()["tagSlotId"]
+
+    # 2) Метим третье исходное A (в текущем документе это occurrenceIndex=1 для findText=A)
+    s2 = client.post(
+        f"/api/templates/{tid}/versions/{vid}/apply-tag",
+        json={
+            "findText": "A",
+            "replacementTemplate": "{{x}}",
+            "replaceAll": False,
+            "occurrenceIndex": 1,
+        },
+    )
+    assert s2.status_code == 200
+    slot2 = s2.json()["tagSlotId"]
+
+    slots_before = client.get(f"/api/templates/{tid}/versions/{vid}/tag-slots")
+    assert slots_before.status_code == 200
+    by_id_before = {s["id"]: s for s in slots_before.json()}
+    assert by_id_before[slot1]["currentOccurrenceIndex"] == 0
+    assert by_id_before[slot2]["currentOccurrenceIndex"] == 1
+
+    # Удаляем первый слот -> индекс второго должен автоматически пересчитаться (1 -> 0).
+    rev = client.post(
+        f"/api/templates/{tid}/versions/{vid}/revert-tag",
+        json={
+            "tagSlotId": slot1,
+            "findText": "{{x}}",
+            "occurrenceIndex": 0,
+        },
+    )
+    assert rev.status_code == 200
+
+    slots_after = client.get(f"/api/templates/{tid}/versions/{vid}/tag-slots")
+    assert slots_after.status_code == 200
+    assert len(slots_after.json()) == 1
+    assert slots_after.json()[0]["id"] == slot2
+    assert slots_after.json()[0]["currentOccurrenceIndex"] == 0

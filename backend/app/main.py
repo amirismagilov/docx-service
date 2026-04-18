@@ -7,6 +7,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -668,6 +669,50 @@ def _try_single_replace_with_fallbacks(
     return docx_bytes, False, None
 
 
+def _list_occurrence_indices_for_text(docx_bytes: bytes, find_text: str, max_scan_occurrences: int = 512) -> list[int]:
+    """Возвращает список существующих occurrenceIndex для find_text в текущем DOCX."""
+    if not find_text:
+        return []
+    probe_token = "__CURSOR_PROBE__"
+    out: list[int] = []
+    for occ in range(max_scan_occurrences):
+        _updated, ok = apply_docx_single_text_replacement(docx_bytes, find_text, probe_token, occ)
+        if not ok:
+            break
+        out.append(occ)
+    return out
+
+
+def _resync_tag_slots(v: dict[str, Any]) -> None:
+    """
+    Синхронизирует current_occurrence_index для всех слотов с фактическим DOCX
+    и удаляет «висячие» слоты, для которых текущий шаблон больше не найден.
+    """
+    docx_bytes = v.get("docx_bytes")
+    if not docx_bytes:
+        return
+    slots: list[dict[str, Any]] = v.setdefault("tag_slots", [])
+    if not slots:
+        return
+
+    slots_by_template: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for s in slots:
+        slots_by_template[s["current_template"]].append(s)
+
+    kept: list[dict[str, Any]] = []
+    for template, group in slots_by_template.items():
+        group_sorted = sorted(group, key=lambda s: (s.get("created_at_utc") or datetime.min.replace(tzinfo=timezone.utc)))
+        occs = _list_occurrence_indices_for_text(docx_bytes, template)
+        assign_count = min(len(group_sorted), len(occs))
+        for idx in range(assign_count):
+            slot = group_sorted[idx]
+            slot["current_occurrence_index"] = occs[idx]
+            kept.append(slot)
+        # Лишние слоты (без фактического вхождения) отбрасываем как устаревшие.
+
+    slots[:] = kept
+
+
 @app.post("/api/templates/{template_id}/versions/{version_id}/apply-tag")
 def apply_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: ApplyTagBody) -> dict[str, Any]:
     v = template_versions.get(version_id)
@@ -765,6 +810,7 @@ def apply_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: Apply
             returned_slot_id = new_id
 
     v["docx_bytes"] = updated
+    _resync_tag_slots(v)
     try:
         v["docx_template_body"] = extract_plain_text_from_docx(updated)
     except Exception:  # noqa: BLE001
@@ -821,6 +867,7 @@ def revert_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: Reve
         raise HTTPException(status_code=404, detail="Не удалось восстановить исходный текст в документе.")
     slots[:] = [s for s in slots if s["id"] != body.tagSlotId]
     v["docx_bytes"] = updated
+    _resync_tag_slots(v)
     try:
         v["docx_template_body"] = extract_plain_text_from_docx(updated)
     except Exception:  # noqa: BLE001
