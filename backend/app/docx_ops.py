@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
@@ -40,6 +41,128 @@ ET.register_namespace("w", W_NS)
 PARA_BREAK_MARKER = "[[PARA_BREAK]]"
 
 
+def norm_tag_fragment(s: str) -> str:
+    """Согласованное сравнение фрагмента с предпросмотром (\\r vs \\n, пробелы после \\n перед {{)."""
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    # NBSP и прочие Unicode-пробелы в превью, не только ASCII [ \\t]
+    return re.sub(r"\n[^\S\r\n]+(?=\{\{)", "\n", s)
+
+
+def _relaxed_tag_fragment_pattern(find_text: str) -> str:
+    """Регулярное выражение: после каждого \\n допускаются пробелы/таб до следующего фрагмента."""
+    ft = norm_tag_fragment(find_text)
+    if "\n" not in ft:
+        return re.escape(ft)
+    parts = ft.split("\n")
+    return r"\n\s*".join(re.escape(p) for p in parts)
+
+
+def _find_all_spans(logical: str, find_text: str) -> list[tuple[int, int]]:
+    """Все непересекающиеся вхождения find_text; при отсутствии точного совпадения — «мягкий» поиск между {{…}}."""
+    if not find_text:
+        return []
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        i = logical.find(find_text, pos)
+        if i < 0:
+            break
+        spans.append((i, i + len(find_text)))
+        pos = i + len(find_text)
+    if spans:
+        return spans
+    pat = _relaxed_tag_fragment_pattern(find_text)
+    return [(m.start(), m.end()) for m in re.finditer(pat, logical)]
+
+
+def expand_replacement_escapes(s: str) -> str:
+    """
+    Пользователь в поле «Шаблон вставки» часто вводит \\n и \\t как два символа.
+    JSON с настоящим переводом строки приходит как символ \\n — его не трогаем.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "t":
+                out.append("\t")
+                i += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                i += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
+def _word_xml_sort_key(fn: str) -> tuple[int, str]:
+    """Стабильный порядок: тело документа раньше колонтитулов (как в предпросмотре)."""
+    base = fn.rsplit("/", 1)[-1].lower()
+    if base == "document.xml":
+        return (0, base)
+    if base.startswith("header"):
+        return (1, base)
+    if base.startswith("footer"):
+        return (2, base)
+    return (3, base)
+
+
+def _total_in_para_occurrences_in_root(root: ET.Element, find_text: str) -> int:
+    n = 0
+    for p in root.findall(".//w:p", NS):
+        logical = _paragraph_logical_text(p)
+        n += len(_find_all_spans(logical, find_text))
+    return n
+
+
+def _cross_paragraph_pair_match_indices(root: ET.Element, find_text: str) -> list[int]:
+    """
+    Индексы i такие, что logical(p[i]) + '\\n' + logical(p[i+1]) совпадает с find_text
+    (два подряд абзаца в XML-порядке = перенос между строками в предпросмотре).
+    """
+    paragraphs = root.findall(".//w:p", NS)
+    matches: list[int] = []
+    for i in range(len(paragraphs) - 1):
+        l1 = _paragraph_logical_text(paragraphs[i])
+        l2 = _paragraph_logical_text(paragraphs[i + 1])
+        combined = l1 + "\n" + l2
+        relaxed = l1.rstrip() + "\n" + l2.lstrip()
+        if combined == find_text or relaxed == find_text:
+            matches.append(i)
+            continue
+        spans = _find_all_spans(combined, find_text)
+        if len(spans) == 1 and spans[0] == (0, len(combined)):
+            matches.append(i)
+    return matches
+
+
+def _whole_paragraph_matches_find_text(logical: str, find_text: str) -> bool:
+    spans = _find_all_spans(logical, find_text)
+    return len(spans) == 1 and spans[0] == (0, len(logical))
+
+
+def _replace_nth_substring(haystack: str, needle: str, repl: str, n: int) -> str | None:
+    """Заменяет n-е вхождение needle (0-based) в haystack на repl. None, если вхождений меньше n + 1."""
+    if not needle:
+        return None
+    spans = _find_all_spans(haystack, needle)
+    if n >= len(spans):
+        return None
+    start, end = spans[n]
+    return haystack[:start] + repl + haystack[end:]
+
+
 def _w_tag(name: str) -> str:
     return f"{{{W_NS}}}{name}"
 
@@ -47,6 +170,57 @@ def _w_tag(name: str) -> str:
 def _paragraph_text(p: ET.Element) -> str:
     texts = list(p.findall(".//w:t", NS))
     return "".join(t.text or "" for t in texts)
+
+
+def _paragraph_logical_text(p: ET.Element) -> str:
+    """Текст абзаца с учётом мягких переносов (w:br) как символов \\n — для подстановки полей без потери разрыва."""
+    parts: list[str] = []
+    for r in p.findall(".//w:r", NS):
+        for sub in r:
+            if sub.tag == _w_tag("t"):
+                parts.append(sub.text or "")
+            elif sub.tag == _w_tag("br"):
+                parts.append("\n")
+    return "".join(parts)
+
+
+def _apply_flat_updated_to_wt_nodes(p: ET.Element, updated: str) -> bool:
+    """Распределяет строку без \\n по существующим w:t (структура без разрывов)."""
+    texts = list(p.findall(".//w:t", NS))
+    if not texts:
+        return False
+    original = "".join(t.text or "" for t in texts)
+    if updated == original:
+        return False
+    cursor = 0
+    for idx, node in enumerate(texts):
+        node_len = len(node.text or "")
+        if idx == len(texts) - 1:
+            node.text = updated[cursor:]
+        else:
+            node.text = updated[cursor : cursor + node_len]
+        cursor += node_len
+    return True
+
+
+def _merge_all_placeholder_tokens_in_paragraph(p: ET.Element, values: dict[str, str]) -> bool:
+    """
+    Заменяет все {{id}} в абзаце за один проход по логической строке (с \\n для w:br),
+    чтобы перенос между плейсхолдерами не терялся при подстановке значений.
+    """
+    logical = _paragraph_logical_text(p)
+    if not logical or "{{" not in logical:
+        return False
+    updated = logical
+    for src, val in values.items():
+        if src in updated:
+            updated = updated.replace(src, "" if val is None else str(val))
+    if updated == logical:
+        return False
+    if "\n" in logical or "\n" in updated:
+        _set_paragraph_text_with_breaks(p, updated)
+        return True
+    return _apply_flat_updated_to_wt_nodes(p, updated)
 
 
 def _make_run_with_text(text: str, template_run: ET.Element | None, break_before: bool = False) -> ET.Element:
@@ -146,6 +320,7 @@ def _replace_tokens_in_word_xml(xml_bytes: bytes, values: dict[str, str]) -> byt
     changed = False
     parent_map = {child: parent for parent in root.iter() for child in parent}
     for p in root.findall(".//w:p", NS):
+        para_handled = False
         for src, val in values.items():
             if PARA_BREAK_MARKER in val:
                 original = _paragraph_text(p)
@@ -155,9 +330,12 @@ def _replace_tokens_in_word_xml(xml_bytes: bytes, values: dict[str, str]) -> byt
                 if parent is None:
                     continue
                 changed = _replace_exact_paragraph_with_parts(parent, p, val) or changed
-            else:
-                did, _unsupported = _replace_template_in_paragraph_runs(p, src, val, True)
-                changed = did or changed
+                para_handled = True
+                break
+        if para_handled:
+            continue
+        if _merge_all_placeholder_tokens_in_paragraph(p, values):
+            changed = True
     if not changed:
         return xml_bytes
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -165,6 +343,7 @@ def _replace_tokens_in_word_xml(xml_bytes: bytes, values: dict[str, str]) -> byt
 
 def apply_docx_text_replacements(docx_bytes: bytes, replacements: dict[str, str]) -> bytes:
     """Заменяет произвольные текстовые фрагменты в word/*.xml с сохранением OOXML-структуры."""
+    replacements = {k: expand_replacement_escapes(v) for k, v in replacements.items()}
     buf_in = io.BytesIO(docx_bytes)
     buf_out = io.BytesIO()
     with (
@@ -217,60 +396,115 @@ def _replace_nth_in_paragraph_runs(p: ET.Element, src: str, dst: str, target_ind
 def apply_docx_single_text_replacement(docx_bytes: bytes, find_text: str, replace_with: str, occurrence_index: int) -> tuple[bytes, bool]:
     """
     Заменяет только одно (N-е) вхождение текста в word/*.xml, сохраняя OOXML-структуру.
-    occurrence_index — 0-based.
+    occurrence_index — 0-based, **глобально по документу**:
+    сначала все вхождения внутри одного w:p (файлы в порядке document → header → footer),
+    затем межабзацные пары (тот же порядок файлов, пары сверху вниз).
     """
+    replace_with = expand_replacement_escapes(replace_with)
     buf_in = io.BytesIO(docx_bytes)
-    buf_out = io.BytesIO()
+    infos: list[zipfile.ZipInfo] = []
+    raw_by_fn: dict[str, bytes] = {}
+    with zipfile.ZipFile(buf_in, "r") as zin:
+        infos = zin.infolist()
+        for zi in infos:
+            fn = zi.filename.replace("\\", "/")
+            raw_by_fn[fn] = zin.read(zi.filename)
+
+    word_xml_fns = sorted(
+        [fn for fn in raw_by_fn if fn.startswith("word/") and fn.endswith(".xml")],
+        key=_word_xml_sort_key,
+    )
+    parsed: dict[str, ET.Element | None] = dict.fromkeys(word_xml_fns)
+    for fn in word_xml_fns:
+        try:
+            parsed[fn] = ET.fromstring(raw_by_fn[fn])
+        except ET.ParseError:
+            parsed[fn] = None
+
+    total_in_para = 0
+    for fn in word_xml_fns:
+        root = parsed.get(fn)
+        if root is not None:
+            total_in_para += _total_in_para_occurrences_in_root(root, find_text)
+
+    modified_fn: str | None = None
     replaced_any = False
-    with (
-        zipfile.ZipFile(buf_in, "r") as zin,
-        zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout,
-    ):
-        for zinfo in zin.infolist():
-            raw = zin.read(zinfo.filename)
-            fn = zinfo.filename.replace("\\", "/")
-            if fn.endswith(".xml") and fn.startswith("word/"):
-                try:
-                    root = ET.fromstring(raw)
-                except ET.ParseError:
-                    zout.writestr(fn, raw, compress_type=zipfile.ZIP_DEFLATED)
+    global_seen = 0
+
+    for fn in word_xml_fns:
+        root = parsed.get(fn)
+        if root is None:
+            continue
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        for p in root.findall(".//w:p", NS):
+            logical = _paragraph_logical_text(p)
+            spans_here = _find_all_spans(logical, find_text)
+            local_count = len(spans_here)
+            if local_count == 0:
+                continue
+            if occurrence_index < global_seen or occurrence_index >= global_seen + local_count:
+                global_seen += local_count
+                continue
+            local_target = occurrence_index - global_seen
+            if PARA_BREAK_MARKER in replace_with:
+                if local_count != 1 or local_target != 0 or not _whole_paragraph_matches_find_text(logical, find_text):
+                    break
+                parent = parent_map.get(p)
+                if parent is None:
+                    break
+                if _replace_exact_paragraph_with_parts(parent, p, replace_with):
+                    modified_fn = fn
+                    replaced_any = True
+                break
+            updated = _replace_nth_substring(logical, find_text, replace_with, local_target)
+            if updated is None:
+                global_seen += local_count
+                continue
+            if "\n" in logical or "\n" in updated:
+                _set_paragraph_text_with_breaks(p, updated)
+            else:
+                _apply_flat_updated_to_wt_nodes(p, updated)
+            modified_fn = fn
+            replaced_any = True
+            break
+        if replaced_any:
+            break
+
+    if not replaced_any and "\n" in find_text:
+        cross_idx = occurrence_index - total_in_para
+        if cross_idx >= 0:
+            cross_matches: list[tuple[str, int]] = []
+            for fn in word_xml_fns:
+                root = parsed.get(fn)
+                if root is None:
                     continue
-                seen = 0
-                changed = False
-                parent_map = {child: parent for parent in root.iter() for child in parent}
-                for p in root.findall(".//w:p", NS):
-                    original = _paragraph_text(p)
-                    local_count = original.count(find_text)
-                    if local_count == 0:
-                        continue
-                    if occurrence_index < seen or occurrence_index >= seen + local_count:
-                        seen += local_count
-                        continue
-                    local_target = occurrence_index - seen
-                    if PARA_BREAK_MARKER in replace_with:
-                        if local_count != 1 or local_target != 0 or original != find_text:
-                            break
-                        parent = parent_map.get(p)
-                        if parent is None:
-                            break
-                        changed = _replace_exact_paragraph_with_parts(parent, p, replace_with)
-                        replaced_any = changed
-                        break
-                    if "\n" in replace_with:
-                        updated = original.replace(find_text, replace_with, 1)
-                        _set_paragraph_text_with_breaks(p, updated)
-                        changed = True
+                for i0 in _cross_paragraph_pair_match_indices(root, find_text):
+                    cross_matches.append((fn, i0))
+            if cross_idx < len(cross_matches):
+                fn, i0 = cross_matches[cross_idx]
+                root = parsed[fn]
+                if root is not None:
+                    parent_map = {child: parent for parent in root.iter() for child in parent}
+                    paragraphs = root.findall(".//w:p", NS)
+                    p_a = paragraphs[i0]
+                    p_b = paragraphs[i0 + 1]
+                    if PARA_BREAK_MARKER not in replace_with:
+                        _set_paragraph_text_with_breaks(p_a, replace_with)
+                        parent = parent_map.get(p_b)
+                        if parent is not None:
+                            parent.remove(p_b)
+                        modified_fn = fn
                         replaced_any = True
-                        break
-                    did, seen_after = _replace_nth_in_paragraph_runs(p, find_text, replace_with, occurrence_index, seen)
-                    seen = seen_after
-                    if did:
-                        changed = True
-                        replaced_any = True
-                        break
-                if changed:
-                    raw = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            zout.writestr(fn, raw, compress_type=zipfile.ZIP_DEFLATED)
+
+    buf_out = io.BytesIO()
+    with zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for zi in infos:
+            fn = zi.filename.replace("\\", "/")
+            raw = raw_by_fn[fn]
+            if replaced_any and modified_fn == fn and parsed.get(fn) is not None:
+                raw = ET.tostring(parsed[fn], encoding="utf-8", xml_declaration=True)
+            zout.writestr(zi, raw, compress_type=zipfile.ZIP_DEFLATED)
+
     return buf_out.getvalue(), replaced_any
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -24,7 +25,9 @@ from app.docx_ops import (
     apply_docx_single_text_replacement,
     apply_docx_text_replacements,
     build_docx_from_plain_text,
+    expand_replacement_escapes,
     extract_plain_text_from_docx,
+    norm_tag_fragment,
     render_version_to_docx,
 )
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
@@ -81,6 +84,13 @@ class ApplyTagBody(BaseModel):
     replacementTemplate: str | None = None
     replaceAll: bool = True
     occurrenceIndex: int | None = None
+    tagSlotId: uuid.UUID | None = None
+
+
+class RevertTagBody(BaseModel):
+    tagSlotId: uuid.UUID
+    findText: str
+    occurrenceIndex: int
 
 
 class PatchTemplateRequest(BaseModel):
@@ -307,6 +317,7 @@ def bootstrap_dkp_template() -> dict[str, Any]:
         "published_at_utc": None,
         "docx_bytes": docx_bytes,
         "source_file_name": None,
+        "tag_slots": [],
     }
     _persist_templates()
     return {
@@ -463,6 +474,7 @@ def bootstrap_empty_template(body: BootstrapEmptyTemplateRequest) -> dict[str, A
         "published_at_utc": None,
         "docx_bytes": None,
         "source_file_name": None,
+        "tag_slots": [],
     }
     _persist_templates()
     return {
@@ -493,6 +505,7 @@ def create_version(template_id: uuid.UUID, body: CreateTemplateVersionRequest) -
         "published_at_utc": None,
         "docx_bytes": None,
         "source_file_name": None,
+        "tag_slots": [],
     }
     template_versions[vid] = v
     _persist_templates()
@@ -514,8 +527,8 @@ def create_version(template_id: uuid.UUID, body: CreateTemplateVersionRequest) -
     )
 
 
-@app.post("/api/templates/{template_id}/versions/{version_id}/publish")
-def publish_version(template_id: uuid.UUID, version_id: uuid.UUID) -> dict[str, Any]:
+def _set_version_published(template_id: uuid.UUID, version_id: uuid.UUID) -> datetime:
+    """Помечает версию опубликованной и текущей для шаблона (без persist)."""
     t = templates.get(template_id)
     v = template_versions.get(version_id)
     if not t or not v or v["template_id"] != template_id:
@@ -525,6 +538,13 @@ def publish_version(template_id: uuid.UUID, version_id: uuid.UUID) -> dict[str, 
     v["published_at_utc"] = now
     t["status"] = TEMPLATE_STATUS_PUBLISHED
     t["current_version_id"] = version_id
+    return now
+
+
+@app.post("/api/templates/{template_id}/versions/{version_id}/publish")
+def publish_version(template_id: uuid.UUID, version_id: uuid.UUID) -> dict[str, Any]:
+    now = _set_version_published(template_id, version_id)
+    t = templates[template_id]
     _persist_templates()
     return {
         "id": str(t["id"]),
@@ -610,13 +630,42 @@ async def upload_docx_template(
         raise HTTPException(status_code=400, detail="Empty file")
     v["docx_bytes"] = raw
     v["source_file_name"] = file.filename or "template.docx"
+    v["tag_slots"] = []
     try:
         v["docx_template_body"] = extract_plain_text_from_docx(raw)
     except Exception:  # noqa: BLE001
         pass
-    _invalidate_publication_for_version(template_id, version_id)
+    _set_version_published(template_id, version_id)
     _persist_templates()
     return {"ok": True, "fileName": v["source_file_name"]}
+
+
+def _try_single_replace_with_fallbacks(
+    docx_bytes: bytes,
+    find_text: str,
+    token: str,
+    preferred_occurrence: int | None,
+    max_scan_occurrences: int = 256,
+) -> tuple[bytes, bool, int | None]:
+    """
+    Пытается заменить фрагмент сначала по preferred_occurrence, затем линейным сканом.
+    Возвращает (updated_bytes, ok, used_occurrence).
+    """
+    tried: set[int] = set()
+    if preferred_occurrence is not None and preferred_occurrence >= 0:
+        tried.add(preferred_occurrence)
+        updated, ok = apply_docx_single_text_replacement(docx_bytes, find_text, token, preferred_occurrence)
+        if ok:
+            return updated, True, preferred_occurrence
+
+    for occ in range(max_scan_occurrences):
+        if occ in tried:
+            continue
+        updated, ok = apply_docx_single_text_replacement(docx_bytes, find_text, token, occ)
+        if ok:
+            return updated, True, occ
+
+    return docx_bytes, False, None
 
 
 @app.post("/api/templates/{template_id}/versions/{version_id}/apply-tag")
@@ -627,29 +676,94 @@ def apply_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: Apply
     docx_bytes = v.get("docx_bytes")
     if not docx_bytes:
         raise HTTPException(status_code=400, detail="Для этой версии нет загруженного DOCX.")
-    find_text = body.findText.strip()
     tag_id = body.tagId.strip()
     replacement_template = (body.replacementTemplate or "").strip()
-    if not find_text:
-        raise HTTPException(status_code=400, detail="Укажите текст для поиска.")
     if replacement_template:
         token = replacement_template
     else:
         if not tag_id:
             raise HTTPException(status_code=400, detail="Укажите id тега или replacementTemplate.")
         token = "{{" + tag_id + "}}"
+
+    slots: list[dict[str, Any]] = v.setdefault("tag_slots", [])
+    returned_slot_id: uuid.UUID | None = None
+    stored_template = expand_replacement_escapes(token)
+
     if body.replaceAll:
+        if body.tagSlotId is not None:
+            raise HTTPException(status_code=400, detail="tagSlotId не используется при replaceAll.")
+        find_text = body.findText.strip()
+        if not find_text:
+            raise HTTPException(status_code=400, detail="Укажите текст для поиска.")
         replacements = {find_text: token}
         updated = apply_docx_text_replacements(docx_bytes, replacements)
         if updated == docx_bytes:
             raise HTTPException(status_code=404, detail="Текст для замены не найден в документе или операция не поддержана в текущем контексте.")
     else:
-        occ = body.occurrenceIndex
-        if occ is None or occ < 0:
-            raise HTTPException(status_code=400, detail="Укажите корректный occurrenceIndex (0-based) для точечной замены.")
-        updated, ok = apply_docx_single_text_replacement(docx_bytes, find_text, token, occ)
+        find_for_replace: str
+        occ_eff: int
+        if body.tagSlotId is not None:
+            slot = next((s for s in slots if s["id"] == body.tagSlotId), None)
+            if slot is None:
+                raise HTTPException(status_code=404, detail="Слот тега не найден.")
+            find_for_replace = slot["current_template"]
+            oix = slot.get("current_occurrence_index")
+            if oix is not None:
+                occ_eff = int(oix)
+            elif body.occurrenceIndex is not None and body.occurrenceIndex >= 0:
+                occ_eff = body.occurrenceIndex
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Для слота не задан индекс вхождения. Обновите страницу.",
+                )
+        else:
+            find_text = body.findText.strip()
+            if not find_text:
+                raise HTTPException(status_code=400, detail="Укажите текст для поиска.")
+            if body.occurrenceIndex is None or body.occurrenceIndex < 0:
+                raise HTTPException(status_code=400, detail="Укажите корректный occurrenceIndex (0-based) для точечной замены.")
+            find_for_replace = find_text
+            occ_eff = body.occurrenceIndex
+
+        updated, ok = apply_docx_single_text_replacement(docx_bytes, find_for_replace, token, occ_eff)
+        used_occ = occ_eff
+        if not ok and body.tagSlotId is not None:
+            # При редактировании по слоту допускаем рассинхрон индекса/форматирования:
+            # пробуем найти то же значение слота по другим вхождениям.
+            updated, ok, used_alt = _try_single_replace_with_fallbacks(docx_bytes, find_for_replace, token, occ_eff)
+            if ok and used_alt is not None:
+                used_occ = used_alt
+        if not ok and body.tagSlotId is not None:
+            # Финальный fallback: пробуем клиентский findText (если он был передан).
+            client_find = body.findText.strip()
+            if client_find:
+                preferred = body.occurrenceIndex if body.occurrenceIndex is not None and body.occurrenceIndex >= 0 else None
+                updated, ok, used_alt = _try_single_replace_with_fallbacks(docx_bytes, client_find, token, preferred)
+                if ok and used_alt is not None:
+                    used_occ = used_alt
         if not ok:
             raise HTTPException(status_code=404, detail="Выделенный фрагмент не найден в документе для точечной замены или операция не поддержана в текущем контексте.")
+        if body.tagSlotId is not None:
+            slot = next((s for s in slots if s["id"] == body.tagSlotId), None)
+            assert slot is not None
+            slot["current_template"] = stored_template
+            slot["current_occurrence_index"] = used_occ
+            returned_slot_id = slot["id"]
+        else:
+            new_id = uuid.uuid4()
+            find_plain = body.findText.strip()
+            slots.append(
+                {
+                    "id": new_id,
+                    "original_plain_text": find_plain,
+                    "current_template": stored_template,
+                    "current_occurrence_index": occ_eff,
+                    "created_at_utc": datetime.now(timezone.utc),
+                }
+            )
+            returned_slot_id = new_id
+
     v["docx_bytes"] = updated
     try:
         v["docx_template_body"] = extract_plain_text_from_docx(updated)
@@ -657,7 +771,63 @@ def apply_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: Apply
         pass
     _invalidate_publication_for_version(template_id, version_id)
     _persist_templates()
-    return {"ok": True, "tag": token}
+    out: dict[str, Any] = {"ok": True, "tag": stored_template}
+    if returned_slot_id is not None:
+        out["tagSlotId"] = str(returned_slot_id)
+    return out
+
+
+@app.get("/api/templates/{template_id}/versions/{version_id}/tag-slots")
+def list_tag_slots(template_id: uuid.UUID, version_id: uuid.UUID) -> list[dict[str, Any]]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Not Found")
+    slots = v.get("tag_slots") or []
+    out: list[dict[str, Any]] = []
+    for s in slots:
+        created = s.get("created_at_utc")
+        out.append(
+            {
+                "id": str(s["id"]),
+                "originalPlainText": s["original_plain_text"],
+                "currentTemplate": s["current_template"],
+                "currentOccurrenceIndex": s.get("current_occurrence_index"),
+                "createdAtUtc": created.isoformat().replace("+00:00", "Z") if created else None,
+            }
+        )
+    return out
+
+
+@app.post("/api/templates/{template_id}/versions/{version_id}/revert-tag")
+def revert_tag_in_docx(template_id: uuid.UUID, version_id: uuid.UUID, body: RevertTagBody) -> dict[str, Any]:
+    v = template_versions.get(version_id)
+    if not v or v["template_id"] != template_id:
+        raise HTTPException(status_code=404, detail="Not Found")
+    docx_bytes = v.get("docx_bytes")
+    if not docx_bytes:
+        raise HTTPException(status_code=400, detail="Для этой версии нет загруженного DOCX.")
+    find_text = body.findText.strip()
+    slots: list[dict[str, Any]] = v.setdefault("tag_slots", [])
+    slot = next((s for s in slots if s["id"] == body.tagSlotId), None)
+    if slot is None:
+        raise HTTPException(status_code=404, detail="Слот тега не найден.")
+    occ = slot.get("current_occurrence_index", body.occurrenceIndex)
+    if occ < 0:
+        raise HTTPException(status_code=400, detail="Укажите корректный occurrenceIndex (0-based).")
+    original = slot["original_plain_text"]
+    find_in_docx = slot["current_template"]
+    updated, ok = apply_docx_single_text_replacement(docx_bytes, find_in_docx, original, occ)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Не удалось восстановить исходный текст в документе.")
+    slots[:] = [s for s in slots if s["id"] != body.tagSlotId]
+    v["docx_bytes"] = updated
+    try:
+        v["docx_template_body"] = extract_plain_text_from_docx(updated)
+    except Exception:  # noqa: BLE001
+        pass
+    _invalidate_publication_for_version(template_id, version_id)
+    _persist_templates()
+    return {"ok": True}
 
 
 @app.get("/api/templates/{template_id}/versions/{version_id}/docx-file")
@@ -672,7 +842,10 @@ def download_template_docx(template_id: uuid.UUID, version_id: uuid.UUID) -> Res
     return Response(
         content=b,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": _content_disposition(name, disposition="inline")},
+        headers={
+            "Content-Disposition": _content_disposition(name, disposition="inline"),
+            "Cache-Control": "no-store",
+        },
     )
 
 

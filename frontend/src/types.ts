@@ -16,6 +16,15 @@ export type TemplateListItem = {
   versions: TemplateVersionRow[]
 }
 
+/** Слот тега на сервере (для восстановления исходного текста). */
+export type TagSlot = {
+  id: string
+  originalPlainText: string
+  currentTemplate: string
+  currentOccurrenceIndex?: number | null
+  createdAtUtc?: string | null
+}
+
 export type TemplateDetail = {
   id: string
   name: string

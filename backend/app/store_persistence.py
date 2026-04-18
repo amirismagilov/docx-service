@@ -60,8 +60,27 @@ def _deserialize_template(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _serialize_tag_slot(s: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(s["id"]),
+        "original_plain_text": s["original_plain_text"],
+        "current_template": s["current_template"],
+        "created_at_utc": _dt_serialize(s.get("created_at_utc")),
+    }
+
+
+def _deserialize_tag_slot(d: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": uuid.UUID(d["id"]),
+        "original_plain_text": d["original_plain_text"],
+        "current_template": d["current_template"],
+        "created_at_utc": _dt_parse(d["created_at_utc"]) if d.get("created_at_utc") else datetime.now(timezone.utc),
+    }
+
+
 def _serialize_version(v: dict[str, Any]) -> dict[str, Any]:
     b = v.get("docx_bytes")
+    slots = v.get("tag_slots") or []
     return {
         "id": str(v["id"]),
         "template_id": str(v["template_id"]),
@@ -74,6 +93,7 @@ def _serialize_version(v: dict[str, Any]) -> dict[str, Any]:
         "published_at_utc": _dt_serialize(v.get("published_at_utc")),
         "docx_bytes_b64": base64.standard_b64encode(b).decode("ascii") if b else None,
         "source_file_name": v.get("source_file_name"),
+        "tag_slots": [_serialize_tag_slot(s) for s in slots],
     }
 
 
@@ -81,6 +101,12 @@ def _deserialize_version(d: dict[str, Any]) -> dict[str, Any]:
     b64 = d.get("docx_bytes_b64")
     raw: bytes | None = base64.standard_b64decode(b64) if b64 else None
     pub = d.get("published_at_utc")
+    raw_slots = d.get("tag_slots")
+    tag_slots: list[dict[str, Any]] = []
+    if isinstance(raw_slots, list):
+        for item in raw_slots:
+            if isinstance(item, dict):
+                tag_slots.append(_deserialize_tag_slot(item))
     return {
         "id": uuid.UUID(d["id"]),
         "template_id": uuid.UUID(str(d["template_id"])),
@@ -93,6 +119,7 @@ def _deserialize_version(d: dict[str, Any]) -> dict[str, Any]:
         "published_at_utc": _dt_parse(pub) if pub else None,
         "docx_bytes": raw,
         "source_file_name": d.get("source_file_name"),
+        "tag_slots": tag_slots,
     }
 
 

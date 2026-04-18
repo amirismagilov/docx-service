@@ -7,6 +7,40 @@ from app.docx_ops import build_docx_from_plain_text
 from app.main import app, templates, template_versions, jobs
 
 
+def test_upload_docx_auto_publishes_and_allows_render_sync_without_publish() -> None:
+    templates.clear()
+    template_versions.clear()
+    jobs.clear()
+
+    client = TestClient(app)
+    r = client.post('/api/templates/bootstrap-empty', json={'name': 'T'})
+    assert r.status_code == 200
+    data = r.json()
+    tid = data['templateId']
+    vid = data['versionId']
+
+    raw = build_docx_from_plain_text('Hello {{x}}')
+    up = client.post(
+        f'/api/templates/{tid}/versions/{vid}/upload-docx',
+        files={'file': ('template.docx', raw, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')},
+    )
+    assert up.status_code == 200
+
+    detail = client.get(f'/api/templates/{tid}')
+    assert detail.status_code == 200
+    vers = {v['id']: v for v in detail.json()['versions']}
+    assert vers[vid]['status'] == 1
+
+    render_r = client.post(
+        f'/api/templates/{tid}/versions/{vid}/render-sync',
+        json={'x': 'world'},
+    )
+    assert render_r.status_code == 200
+    assert render_r.headers.get('content-type', '').startswith(
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    )
+
+
 def test_put_editor_text_rejected_for_uploaded_docx() -> None:
     templates.clear()
     template_versions.clear()

@@ -24,6 +24,7 @@ def test_persist_and_load_roundtrip(tmp_path: Path) -> None:
             "current_version_id": vid,
         }
     }
+    slot_id = uuid.uuid4()
     template_versions = {
         vid: {
             "id": vid,
@@ -37,6 +38,14 @@ def test_persist_and_load_roundtrip(tmp_path: Path) -> None:
             "published_at_utc": None,
             "docx_bytes": b"PK\x03\x04fake",
             "source_file_name": "a.docx",
+            "tag_slots": [
+                {
+                    "id": slot_id,
+                    "original_plain_text": "Old",
+                    "current_template": "{{x}}",
+                    "created_at_utc": now,
+                }
+            ],
         }
     }
     path = tmp_path / "store.json"
@@ -50,3 +59,8 @@ def test_persist_and_load_roundtrip(tmp_path: Path) -> None:
     ver = v2[vid]
     assert ver["docx_template_body"] == "Hello"
     assert ver["docx_bytes"] == b"PK\x03\x04fake"
+    slots = ver.get("tag_slots") or []
+    assert len(slots) == 1
+    assert slots[0]["id"] == slot_id
+    assert slots[0]["original_plain_text"] == "Old"
+    assert slots[0]["current_template"] == "{{x}}"
