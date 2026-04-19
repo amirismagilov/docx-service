@@ -55,3 +55,10 @@ This report summarizes roadmap completion status for industrial DOCX Service v1.
 1. Run `Release Evidence` workflow for release candidate commit.
 2. Run `Go No-Go Check` workflow and attach report artifact.
 3. Execute canary rollout checklist and capture decision record.
+
+## Final v1 Decision Snapshot
+- Release commit: `0455acda495b3a3a7c719cdc3c82aed0e23082d8`
+- Decision: `GO`
+- Evidence records:
+  - `docs/ops/evidence/release-0455acda495b3a3a7c719cdc3c82aed0e23082d8.md`
+  - `docs/ops/evidence/go-no-go-0455acda495b3a3a7c719cdc3c82aed0e23082d8.md`
