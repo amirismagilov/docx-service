@@ -44,7 +44,9 @@ jobs:
       - name: Run OWASP ZAP baseline
         run: |
           mkdir -p /tmp/zap
+          chmod 777 /tmp/zap
           docker run --rm --network host \
+            --user root \
             -v /tmp/zap:/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
             -t http://127.0.0.1:8080 \
