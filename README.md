@@ -26,6 +26,8 @@
 - `docs/api/openapi-v1.yaml` — контракт API v1 для интеграции.
 - `docs/api/integration-guide-v1.md` — практический гайд подключения к API v1.
 - `docs/security/security-contours.md` — baseline/enhanced security контуры и go-live критерии.
+- `docs/security/threat-model-v1.md` — threat model v1 с маппингом угроз и контролей.
+- `docs/security/security-test-pack-v1.md` — минимальный security test pack и критерии выхода.
 - `docs/engineering/render-engine-hardening.md` — план усиления рендер-движка и бенчмарки.
 - `docs/observability/analytics-audit-model.md` — модель статистики и аудита.
 - `docs/observability/otel-setup.md` — настройка OpenTelemetry tracing.
@@ -111,6 +113,7 @@ npm run build
 - `Deploy` workflow теперь делает повторную попытку деплоя при transient-сбоях.
 - `SLO Smoke` workflow (`workflow_dispatch` + nightly schedule) поднимает backend и прогоняет k6 сценарии из `perf/k6`.
 - `DR Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет backup/restore smoke сценарий и сохраняет backup bundle как artifact.
+- `DAST Smoke` workflow (`workflow_dispatch` + nightly schedule) выполняет OWASP ZAP baseline и сохраняет security reports.
 
 ## Основные сценарии API
 

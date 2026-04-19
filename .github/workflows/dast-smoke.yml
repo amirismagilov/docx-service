@@ -1,0 +1,67 @@
+name: DAST Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  dast:
+    name: zap baseline smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Start backend for scan
+        working-directory: backend
+        env:
+          DOCX_SERVICE_GENERATION_STORE: sqlite
+          DOCX_SERVICE_V1_BEARER_TOKEN: dev-v1-token
+          DOCX_SERVICE_OTEL_ENABLED: "0"
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 >/tmp/docx-backend.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend did not become healthy in time"
+          cat /tmp/docx-backend.log || true
+          exit 1
+
+      - name: Run OWASP ZAP baseline
+        run: |
+          mkdir -p /tmp/zap
+          docker run --rm --network host \
+            -v /tmp/zap:/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://127.0.0.1:8080 \
+            -r zap-report.html \
+            -J zap-report.json \
+            -m 3 \
+            -I
+
+      - name: Upload DAST reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-smoke-reports
+          path: |
+            /tmp/zap/zap-report.html
+            /tmp/zap/zap-report.json
+
+      - name: Print backend log on failure
+        if: failure()
+        run: cat /tmp/docx-backend.log || true
