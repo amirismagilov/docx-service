@@ -36,6 +36,7 @@
 - `docs/testing/test-strategy-v1.md` — полная тест-стратегия.
 - `docs/e2e-test-cases.md` — каталог E2E кейсов.
 - `docs/roadmap/industrial-v1-delivery-roadmap.md` — поэтапный delivery roadmap.
+- `docs/roadmap/industrial-v1-closure-report.md` — итоговый статус выполнения roadmap и exit criteria.
 - `docs/ops/runbook-v1.md` — эксплуатационный runbook для v1.
 - `docs/ops/canary-rollout-checklist-v1.md` — чеклист канареечного выката.
 - `docs/ops/release-evidence-pack-v1.md` — шаблон release evidence pack для go-live sign-off.

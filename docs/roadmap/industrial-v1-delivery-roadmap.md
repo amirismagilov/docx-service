@@ -119,3 +119,7 @@ Exit criteria:
 - Audit/statistics endpoints accurate.
 - Backup/restore and DR smoke passed.
 - Integrator onboarding docs accepted.
+
+## Closure
+- Final closure and exit-criteria mapping:
+  - `docs/roadmap/industrial-v1-closure-report.md`
