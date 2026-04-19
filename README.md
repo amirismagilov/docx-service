@@ -20,6 +20,18 @@
 - `docs` — рабочая документация по развитию продукта.
 - `docker-compose.yml` — локальный запуск проекта в контейнерах.
 
+### Документы для промышленной версии (v1)
+
+- `docs/adr/0001-industrial-architecture.md` — целевая архитектура и ключевые решения.
+- `docs/api/openapi-v1.yaml` — контракт API v1 для интеграции.
+- `docs/security/security-contours.md` — baseline/enhanced security контуры и go-live критерии.
+- `docs/engineering/render-engine-hardening.md` — план усиления рендер-движка и бенчмарки.
+- `docs/observability/analytics-audit-model.md` — модель статистики и аудита.
+- `docs/data-model/schema-v1.sql` — черновой SQL-дизайн схемы данных v1.
+- `docs/testing/test-strategy-v1.md` — полная тест-стратегия.
+- `docs/e2e-test-cases.md` — каталог E2E кейсов.
+- `docs/roadmap/industrial-v1-delivery-roadmap.md` — поэтапный delivery roadmap.
+
 ## Быстрый старт
 
 ### Локально
@@ -38,6 +50,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
+
+Дополнительно для `v1` generation store:
+
+- `DOCX_SERVICE_GENERATION_STORE=sqlite|postgres` (по умолчанию `sqlite`)
+- `DOCX_SERVICE_DB_PATH=/path/to/production.db` (для sqlite)
+- `DOCX_SERVICE_RESULTS_DIR=/path/to/generated` (каталог артефактов)
+- `DOCX_SERVICE_PG_DSN=postgresql://...` (обязательно при `postgres`)
 
 Frontend:
 

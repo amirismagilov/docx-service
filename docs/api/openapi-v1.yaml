@@ -1,0 +1,896 @@
+openapi: 3.1.0
+info:
+  title: DOCX Service API
+  version: 1.0.0
+  description: |
+    Industrial API for template management and document generation.
+    Supports synchronous and asynchronous generation, template versioning,
+    conditional blocks, facsimile signatures, and per-document statistics.
+servers:
+  - url: https://docx-service.internal/api/v1
+security:
+  - OAuth2ClientCredentials: []
+tags:
+  - name: Documents
+  - name: Versions
+  - name: ConditionalBlocks
+  - name: Signatures
+  - name: Generations
+  - name: Statistics
+  - name: Health
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Service health check
+      operationId: getHealth
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, timestampUtc]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  timestampUtc:
+                    type: string
+                    format: date-time
+
+  /documents:
+    get:
+      tags: [Documents]
+      summary: List documents
+      operationId: listDocuments
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+    post:
+      tags: [Documents]
+      summary: Create document
+      operationId: createDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDocumentRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+
+  /documents/{documentId}:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+    get:
+      tags: [Documents]
+      summary: Get document detail
+      operationId: getDocument
+      responses:
+        "200":
+          description: Document detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentDetail"
+    patch:
+      tags: [Documents]
+      summary: Update document metadata
+      operationId: patchDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchDocumentRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+    delete:
+      tags: [Documents]
+      summary: Delete document
+      operationId: deleteDocument
+      responses:
+        "204":
+          description: Deleted
+
+  /documents/{documentId}/versions:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+    get:
+      tags: [Versions]
+      summary: List document versions
+      operationId: listVersions
+      responses:
+        "200":
+          description: Version list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DocumentVersion"
+    post:
+      tags: [Versions]
+      summary: Create new draft version
+      operationId: createVersion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVersionRequest"
+      responses:
+        "201":
+          description: Created version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentVersion"
+
+  /documents/{documentId}/versions/{versionId}/publish:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+    post:
+      tags: [Versions]
+      summary: Publish version (immutable)
+      operationId: publishVersion
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentVersion"
+
+  /documents/{documentId}/versions/{versionId}/docx:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+    post:
+      tags: [Versions]
+      summary: Upload DOCX binary for version
+      operationId: uploadVersionDocx
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentVersion"
+
+  /documents/{documentId}/versions/{versionId}/conditional-blocks:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+    get:
+      tags: [ConditionalBlocks]
+      summary: List conditional blocks
+      operationId: listConditionalBlocks
+      responses:
+        "200":
+          description: Conditional blocks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConditionalBlock"
+    post:
+      tags: [ConditionalBlocks]
+      summary: Create conditional block
+      operationId: createConditionalBlock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConditionalBlockRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConditionalBlock"
+
+  /documents/{documentId}/versions/{versionId}/conditional-blocks/{blockId}:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+      - $ref: "#/components/parameters/BlockId"
+    patch:
+      tags: [ConditionalBlocks]
+      summary: Update conditional block
+      operationId: patchConditionalBlock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchConditionalBlockRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConditionalBlock"
+    delete:
+      tags: [ConditionalBlocks]
+      summary: Delete conditional block
+      operationId: deleteConditionalBlock
+      responses:
+        "204":
+          description: Deleted
+
+  /documents/{documentId}/versions/{versionId}/signature-assets:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+    get:
+      tags: [Signatures]
+      summary: List signature assets
+      operationId: listSignatureAssets
+      responses:
+        "200":
+          description: Signature assets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SignatureAsset"
+    post:
+      tags: [Signatures]
+      summary: Upload signature asset image
+      operationId: createSignatureAsset
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                name:
+                  type: string
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignatureAsset"
+
+  /documents/{documentId}/versions/{versionId}/signature-slots:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+      - $ref: "#/components/parameters/VersionId"
+    get:
+      tags: [Signatures]
+      summary: List signature slots
+      operationId: listSignatureSlots
+      responses:
+        "200":
+          description: Signature slots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SignatureSlot"
+    post:
+      tags: [Signatures]
+      summary: Create signature slot
+      operationId: createSignatureSlot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSignatureSlotRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignatureSlot"
+
+  /generations/sync:
+    post:
+      tags: [Generations]
+      summary: Generate document synchronously
+      operationId: generateSync
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateSyncRequest"
+      responses:
+        "200":
+          description: Generated document
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Accepted for async fallback
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationJobAccepted"
+
+  /generations/async:
+    post:
+      tags: [Generations]
+      summary: Generate document asynchronously
+      operationId: generateAsync
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateAsyncRequest"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationJobAccepted"
+
+  /generations/{jobId}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [Generations]
+      summary: Get generation job status
+      operationId: getGenerationJob
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationJobStatus"
+
+  /generations/{jobId}/result:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [Generations]
+      summary: Get generation result
+      operationId: getGenerationResult
+      responses:
+        "200":
+          description: Generated file or signed URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationResult"
+        "409":
+          description: Job not completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /documents/{documentId}/statistics:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+    get:
+      tags: [Statistics]
+      summary: Get document generation statistics
+      operationId: getDocumentStatistics
+      parameters:
+        - in: query
+          name: fromUtc
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: toUtc
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentStatisticsResponse"
+
+components:
+  securitySchemes:
+    OAuth2ClientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.internal/oauth2/token
+          scopes:
+            docx.read: Read templates and statistics
+            docx.write: Manage templates and settings
+            docx.generate: Generate documents
+  parameters:
+    DocumentId:
+      in: path
+      name: documentId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    VersionId:
+      in: path
+      name: versionId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BlockId:
+      in: path
+      name: blockId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobId:
+      in: path
+      name: jobId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    RequestId:
+      in: header
+      name: X-Request-Id
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  schemas:
+    Document:
+      type: object
+      required: [id, name, activeVersionId, publishedVersionId, updatedAtUtc]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 256
+        activeVersionId:
+          type: string
+          format: uuid
+        publishedVersionId:
+          type: string
+          format: uuid
+          nullable: true
+        updatedAtUtc:
+          type: string
+          format: date-time
+    DocumentVersion:
+      type: object
+      required: [id, documentId, state, createdAtUtc]
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [draft, published, archived]
+        sourceFileName:
+          type: string
+          nullable: true
+        schemaJson:
+          type: string
+          nullable: true
+        createdAtUtc:
+          type: string
+          format: date-time
+    DocumentDetail:
+      allOf:
+        - $ref: "#/components/schemas/Document"
+        - type: object
+          properties:
+            versions:
+              type: array
+              items:
+                $ref: "#/components/schemas/DocumentVersion"
+    DocumentListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+        nextCursor:
+          type: string
+          nullable: true
+    CreateDocumentRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        schemaJson:
+          type: string
+          nullable: true
+    PatchDocumentRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+    CreateVersionRequest:
+      type: object
+      properties:
+        baseVersionId:
+          type: string
+          format: uuid
+    ConditionalBlock:
+      type: object
+      required:
+        [id, findTemplate, occurrenceIndex, conditionField, equalsValue, branch, createdAtUtc]
+      properties:
+        id:
+          type: string
+          format: uuid
+        findTemplate:
+          type: string
+          minLength: 1
+        occurrenceIndex:
+          type: integer
+          minimum: 0
+        conditionField:
+          type: string
+          minLength: 1
+        equalsValue:
+          type: string
+        branch:
+          type: string
+          enum: [if]
+        createdAtUtc:
+          type: string
+          format: date-time
+    CreateConditionalBlockRequest:
+      type: object
+      required: [findTemplate, occurrenceIndex, conditionField, equalsValue]
+      properties:
+        findTemplate:
+          type: string
+        occurrenceIndex:
+          type: integer
+          minimum: 0
+        conditionField:
+          type: string
+        equalsValue:
+          type: string
+    PatchConditionalBlockRequest:
+      type: object
+      properties:
+        conditionField:
+          type: string
+        equalsValue:
+          type: string
+    SignatureAsset:
+      type: object
+      required: [id, name, mimeType, sizeBytes, createdAtUtc]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        mimeType:
+          type: string
+          enum: [image/png, image/jpeg]
+        sizeBytes:
+          type: integer
+          minimum: 1
+        objectKey:
+          type: string
+        createdAtUtc:
+          type: string
+          format: date-time
+    SignatureSlot:
+      type: object
+      required: [id, anchorText, occurrenceIndex, signatureAssetId, createdAtUtc]
+      properties:
+        id:
+          type: string
+          format: uuid
+        anchorText:
+          type: string
+        occurrenceIndex:
+          type: integer
+          minimum: 0
+        signatureAssetId:
+          type: string
+          format: uuid
+        offsetXPt:
+          type: number
+          default: 0
+        offsetYPt:
+          type: number
+          default: 0
+        widthPt:
+          type: number
+          minimum: 10
+          default: 120
+        heightPt:
+          type: number
+          minimum: 10
+          default: 40
+        createdAtUtc:
+          type: string
+          format: date-time
+    CreateSignatureSlotRequest:
+      type: object
+      required: [anchorText, occurrenceIndex, signatureAssetId]
+      properties:
+        anchorText:
+          type: string
+        occurrenceIndex:
+          type: integer
+          minimum: 0
+        signatureAssetId:
+          type: string
+          format: uuid
+        offsetXPt:
+          type: number
+          default: 0
+        offsetYPt:
+          type: number
+          default: 0
+        widthPt:
+          type: number
+          minimum: 10
+          default: 120
+        heightPt:
+          type: number
+          minimum: 10
+          default: 40
+    GenerateSyncRequest:
+      type: object
+      required: [documentId, payload]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        versionId:
+          type: string
+          format: uuid
+        payload:
+          type: object
+          additionalProperties: true
+        options:
+          type: object
+          properties:
+            outputMode:
+              type: string
+              enum: [inline, url]
+              default: inline
+            failIfAsyncFallback:
+              type: boolean
+              default: false
+    GenerateAsyncRequest:
+      type: object
+      required: [documentId, payload]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        versionId:
+          type: string
+          format: uuid
+        payload:
+          type: object
+          additionalProperties: true
+        callback:
+          type: object
+          properties:
+            url:
+              type: string
+              format: uri
+            secretId:
+              type: string
+        ttlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 604800
+          default: 86400
+    GenerationJobAccepted:
+      type: object
+      required: [jobId, status, statusUrl]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+        statusUrl:
+          type: string
+          format: uri
+    GenerationJobStatus:
+      type: object
+      required: [jobId, status, createdAtUtc, updatedAtUtc]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, expired]
+        errorCode:
+          type: string
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+        startedAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+        createdAtUtc:
+          type: string
+          format: date-time
+        updatedAtUtc:
+          type: string
+          format: date-time
+        latencyMs:
+          type: integer
+          minimum: 0
+          nullable: true
+    GenerationResult:
+      type: object
+      required: [jobId, resultMode]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        resultMode:
+          type: string
+          enum: [url, inlineMeta]
+        fileName:
+          type: string
+          nullable: true
+        mimeType:
+          type: string
+          nullable: true
+        downloadUrl:
+          type: string
+          format: uri
+          nullable: true
+        sha256:
+          type: string
+          nullable: true
+        sizeBytes:
+          type: integer
+          minimum: 0
+          nullable: true
+    DocumentStatisticsResponse:
+      type: object
+      required: [documentId, totals, byStatus, latency]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        totals:
+          type: object
+          required: [calls, success, failed]
+          properties:
+            calls:
+              type: integer
+            success:
+              type: integer
+            failed:
+              type: integer
+        byStatus:
+          type: object
+          additionalProperties:
+            type: integer
+        latency:
+          type: object
+          required: [p50Ms, p95Ms, p99Ms]
+          properties:
+            p50Ms:
+              type: integer
+            p95Ms:
+              type: integer
+            p99Ms:
+              type: integer
+        topCallers:
+          type: array
+          items:
+            type: object
+            required: [clientId, calls]
+            properties:
+              clientId:
+                type: string
+                format: uuid
+              calls:
+                type: integer
+    ApiError:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        requestId:
+          type: string

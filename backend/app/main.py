@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import secrets
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -33,6 +35,8 @@ from app.docx_ops import (
     remove_docx_fragment,
     render_version_to_docx,
 )
+from app.generation_store import GenerationStore
+from app.store_factory import create_generation_store
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
 
 
@@ -125,6 +129,21 @@ class BootstrapEmptyTemplateRequest(BaseModel):
     name: str = "Новый документ"
 
 
+class GenerateSyncV1Request(BaseModel):
+    documentId: uuid.UUID
+    versionId: uuid.UUID | None = None
+    payload: dict[str, Any]
+    options: dict[str, Any] | None = None
+
+
+class GenerateAsyncV1Request(BaseModel):
+    documentId: uuid.UUID
+    versionId: uuid.UUID | None = None
+    payload: dict[str, Any]
+    callback: dict[str, Any] | None = None
+    ttlSeconds: int | None = None
+
+
 # --- In-memory store (same role as EF InMemory DB) ---
 
 TEMPLATE_STATUS_DRAFT = 0
@@ -148,10 +167,19 @@ templates: dict[uuid.UUID, dict[str, Any]] = {}
 template_versions: dict[uuid.UUID, dict[str, Any]] = {}
 jobs: dict[uuid.UUID, dict[str, Any]] = {}
 
-job_queue: asyncio.Queue[uuid.UUID] = asyncio.Queue()
+job_queue: asyncio.Queue[uuid.UUID] | None = None
 worker_task: asyncio.Task | None = None
+v1_job_queue: asyncio.Queue[uuid.UUID] | None = None
+v1_worker_task: asyncio.Task | None = None
+production_store: GenerationStore | None = None
 
 STORE_PATH = default_store_path()
+PROD_DB_PATH = Path(os.environ.get("DOCX_SERVICE_DB_PATH", str(Path(__file__).resolve().parent.parent / "data" / "production.db")))
+PROD_RESULTS_DIR = Path(
+    os.environ.get("DOCX_SERVICE_RESULTS_DIR", str(Path(__file__).resolve().parent.parent / "data" / "generated"))
+)
+GENERATION_STORE_BACKEND = os.environ.get("DOCX_SERVICE_GENERATION_STORE", "sqlite")
+POSTGRES_DSN = os.environ.get("DOCX_SERVICE_PG_DSN")
 
 
 def _persist_templates() -> None:
@@ -265,6 +293,7 @@ async def _process_job(job_id: uuid.UUID, http_client: httpx.AsyncClient) -> Non
 
 
 async def _worker_loop() -> None:
+    assert job_queue is not None
     async with httpx.AsyncClient() as http_client:
         while True:
             job_id = await job_queue.get()
@@ -274,13 +303,80 @@ async def _worker_loop() -> None:
                 job_queue.task_done()
 
 
+def _resolve_published_version_for_v1(document_id: uuid.UUID, version_id: uuid.UUID | None) -> dict[str, Any]:
+    t = templates.get(document_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    effective_version_id = version_id or t.get("current_version_id")
+    if not effective_version_id:
+        raise HTTPException(status_code=400, detail="Document has no active version.")
+    v = template_versions.get(effective_version_id)
+    if not v or v["template_id"] != document_id:
+        raise HTTPException(status_code=404, detail="Version not found.")
+    if v["status"] != VERSION_STATUS_PUBLISHED:
+        raise HTTPException(status_code=400, detail="Publish document version before generation.")
+    return v
+
+
+def _ensure_production_store() -> GenerationStore:
+    global production_store
+    if production_store is None:
+        production_store = create_generation_store(
+            backend=GENERATION_STORE_BACKEND,
+            sqlite_db_path=PROD_DB_PATH,
+            result_dir=PROD_RESULTS_DIR,
+            pg_dsn=POSTGRES_DSN,
+        )
+    return production_store
+
+
+async def _process_v1_generation_job(job_id: uuid.UUID) -> None:
+    store = _ensure_production_store()
+    rec = store.get_generation(job_id)
+    try:
+        store.mark_running(job_id)
+        version = _resolve_published_version_for_v1(rec.document_id, rec.version_id)
+        fn, data = render_version_to_docx(
+            docx_bytes=version.get("docx_bytes"),
+            docx_template_body=version["docx_template_body"],
+            bindings_json=version["bindings_json"],
+            rules_json=version["rules_json"],
+            payload_json=rec.payload_json,
+            conditional_blocks=version.get("conditional_blocks") or [],
+        )
+        store.mark_succeeded(job_id, fn, data)
+    except Exception as exc:  # noqa: BLE001
+        store.mark_failed(job_id, "generation_error", str(exc))
+
+
+async def _v1_worker_loop() -> None:
+    assert v1_job_queue is not None
+    while True:
+        job_id = await v1_job_queue.get()
+        try:
+            await _process_v1_generation_job(job_id)
+        finally:
+            v1_job_queue.task_done()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global templates, template_versions, worker_task
+    global templates, template_versions, worker_task, v1_worker_task, production_store, job_queue, v1_job_queue
     loaded = try_load_templates(STORE_PATH)
     if loaded:
         templates, template_versions = loaded
+    job_queue = asyncio.Queue()
+    v1_job_queue = asyncio.Queue()
     worker_task = asyncio.create_task(_worker_loop())
+    production_store = create_generation_store(
+        backend=GENERATION_STORE_BACKEND,
+        sqlite_db_path=PROD_DB_PATH,
+        result_dir=PROD_RESULTS_DIR,
+        pg_dsn=POSTGRES_DSN,
+    )
+    for queued_id in production_store.list_queued_generation_ids():
+        await v1_job_queue.put(queued_id)
+    v1_worker_task = asyncio.create_task(_v1_worker_loop())
     yield
     if worker_task:
         worker_task.cancel()
@@ -288,6 +384,17 @@ async def lifespan(app: FastAPI):
             await worker_task
         except asyncio.CancelledError:
             pass
+    if v1_worker_task:
+        v1_worker_task.cancel()
+        try:
+            await v1_worker_task
+        except asyncio.CancelledError:
+            pass
+    if production_store:
+        production_store.close()
+        production_store = None
+    job_queue = None
+    v1_job_queue = None
 
 
 app = FastAPI(title="DOCX Forms Service", lifespan=lifespan)
@@ -1170,6 +1277,8 @@ async def create_job(
         "finished_at_utc": None,
     }
     jobs[jid] = job
+    if job_queue is None:
+        raise HTTPException(status_code=503, detail="Job queue is unavailable.")
     await job_queue.put(jid)
     return JSONResponse(
         status_code=202,
@@ -1208,6 +1317,158 @@ def get_job_result(job_id: uuid.UUID) -> Response:
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": _content_disposition(name, disposition="attachment")},
     )
+
+
+def _generation_record_to_api(rec: Any) -> dict[str, Any]:
+    return {
+        "jobId": str(rec.id),
+        "status": rec.status,
+        "documentId": str(rec.document_id),
+        "versionId": str(rec.version_id),
+        "createdAtUtc": rec.created_at_utc,
+        "startedAtUtc": rec.started_at_utc,
+        "finishedAtUtc": rec.finished_at_utc,
+        "latencyMs": rec.latency_ms,
+        "errorCode": rec.error_code,
+        "errorMessage": rec.error_message,
+    }
+
+
+@app.post("/api/v1/generations/sync")
+def generate_sync_v1(
+    body: GenerateSyncV1Request,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    request_id: str | None = Header(None, alias="X-Request-Id"),
+) -> Response:
+    req_id = request_id or str(uuid.uuid4())
+    version = _resolve_published_version_for_v1(body.documentId, body.versionId)
+    store = _ensure_production_store()
+    if idempotency_key:
+        existing = store.find_by_idempotency_key(
+            document_id=body.documentId,
+            version_id=version["id"],
+            idempotency_key=idempotency_key,
+        )
+        if existing and existing.status == "succeeded" and existing.storage_path:
+            path = Path(existing.storage_path)
+            if path.is_file():
+                return Response(
+                    content=path.read_bytes(),
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": _content_disposition(existing.file_name or "generated.docx", "attachment")},
+                )
+    rec = store.create_generation(
+        document_id=body.documentId,
+        version_id=version["id"],
+        mode="sync",
+        request_id=req_id,
+        idempotency_key=idempotency_key,
+        payload=body.payload,
+        status="running",
+    )
+    try:
+        fn, data = render_version_to_docx(
+            docx_bytes=version.get("docx_bytes"),
+            docx_template_body=version["docx_template_body"],
+            bindings_json=version["bindings_json"],
+            rules_json=version["rules_json"],
+            payload_json=json.dumps(body.payload, ensure_ascii=False),
+            conditional_blocks=version.get("conditional_blocks") or [],
+        )
+        store.mark_succeeded(rec.id, fn, data)
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": _content_disposition(fn, "attachment"),
+                "X-Request-Id": req_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        store.mark_failed(rec.id, "generation_error", str(exc))
+        raise HTTPException(status_code=500, detail="Generation failed.") from exc
+
+
+@app.post("/api/v1/generations/async")
+async def generate_async_v1(
+    body: GenerateAsyncV1Request,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    request_id: str | None = Header(None, alias="X-Request-Id"),
+) -> JSONResponse:
+    req_id = request_id or str(uuid.uuid4())
+    version = _resolve_published_version_for_v1(body.documentId, body.versionId)
+    store = _ensure_production_store()
+    if idempotency_key:
+        existing = store.find_by_idempotency_key(
+            document_id=body.documentId,
+            version_id=version["id"],
+            idempotency_key=idempotency_key,
+        )
+        if existing:
+            return JSONResponse(
+                status_code=202,
+                content={"jobId": str(existing.id), "status": existing.status, "statusUrl": f"/api/v1/generations/{existing.id}"},
+            )
+    rec = store.create_generation(
+        document_id=body.documentId,
+        version_id=version["id"],
+        mode="async",
+        request_id=req_id,
+        idempotency_key=idempotency_key,
+        payload=body.payload,
+        status="queued",
+    )
+    if v1_job_queue is None:
+        raise HTTPException(status_code=503, detail="Generation queue is unavailable.")
+    await v1_job_queue.put(rec.id)
+    store.add_audit_event(
+        generation_request_id=rec.id,
+        event_type="generation.queued",
+        severity="info",
+        actor_id="system",
+        request_id=req_id,
+        metadata={},
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"jobId": str(rec.id), "status": "queued", "statusUrl": f"/api/v1/generations/{rec.id}"},
+        headers={"Location": f"/api/v1/generations/{rec.id}"},
+    )
+
+
+@app.get("/api/v1/generations/{job_id}")
+def get_generation_v1(job_id: uuid.UUID) -> dict[str, Any]:
+    store = _ensure_production_store()
+    try:
+        rec = store.get_generation(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Generation not found.") from exc
+    return _generation_record_to_api(rec)
+
+
+@app.get("/api/v1/generations/{job_id}/result")
+def get_generation_result_v1(job_id: uuid.UUID) -> Response:
+    store = _ensure_production_store()
+    try:
+        rec = store.get_generation(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Generation not found.") from exc
+    if rec.status != "succeeded" or not rec.storage_path:
+        raise HTTPException(status_code=409, detail="Result is not ready.")
+    path = Path(rec.storage_path)
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="Result artifact expired.")
+    return Response(
+        content=path.read_bytes(),
+        media_type=rec.mime_type or "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": _content_disposition(rec.file_name or "generated.docx", "attachment")},
+    )
+
+
+@app.get("/api/v1/documents/{document_id}/statistics")
+def get_document_statistics_v1(document_id: uuid.UUID) -> dict[str, Any]:
+    store = _ensure_production_store()
+    return store.get_document_statistics(document_id)
 
 
 @app.post("/api/webhooks/test")
