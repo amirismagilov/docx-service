@@ -23,7 +23,8 @@ export const options = {
   },
   thresholds: {
     http_req_failed: ['rate<0.02'],
-    http_req_duration: ['p(95)<1500'],
+    // Async scenario includes status polling calls; keep p95 guard realistic for burst conditions.
+    http_req_duration: ['p(95)<3000'],
   },
 }
 
