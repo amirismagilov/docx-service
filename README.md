@@ -39,12 +39,14 @@
 - `docs/ops/runbook-v1.md` — эксплуатационный runbook для v1.
 - `docs/ops/canary-rollout-checklist-v1.md` — чеклист канареечного выката.
 - `docs/ops/release-evidence-pack-v1.md` — шаблон release evidence pack для go-live sign-off.
+- `docs/ops/go-no-go-checklist-v1.md` — go/no-go чеклист и шаблон решения релиза.
 - `perf/README.md` — нагрузочные smoke/burst сценарии на k6.
 - `scripts/canary_smoke.sh` — автоматизированный canary smoke script.
 - `scripts/backup_generation_store.sh` — создание backup bundle generation store + artifacts.
 - `scripts/dr_restore_smoke.sh` — DR restore smoke для backup bundle.
 - `scripts/security_smoke.sh` — security smoke для auth/size/rate-limit проверок.
 - `scripts/generate_release_evidence.py` — генерация markdown evidence record по workflow run ссылкам.
+- `scripts/go_no_go_check.py` — автоматическая проверка go/no-go readiness по workflow статусам.
 
 ## Быстрый старт
 
@@ -119,6 +121,7 @@ npm run build
 - `DAST Smoke` workflow (`workflow_dispatch` + nightly schedule) выполняет OWASP ZAP baseline и сохраняет security reports.
 - `Security Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет базовые security anti-regressions (`401/413/429`).
 - `Release Evidence` workflow (`workflow_dispatch`) генерирует release evidence markdown и сохраняет как artifact.
+- `Go No-Go Check` workflow (`workflow_dispatch`) проверяет готовность релиза и публикует отчет.
 
 ## Основные сценарии API
 

@@ -86,6 +86,8 @@ Default output:
 GitHub Actions option:
 - Run `Release Evidence` workflow (`.github/workflows/release-evidence.yml`) with optional `commit` and `owner` inputs.
 - Download artifact `release-evidence` and attach it to release materials.
+- Validate workflow readiness before sign-off:
+  - `python scripts/go_no_go_check.py --commit <sha>`
 
 ## Storage and Retention
 - Store evidence pack alongside release artifacts in immutable release storage.

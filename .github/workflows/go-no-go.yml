@@ -1,0 +1,48 @@
+name: Go No-Go Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit SHA (optional, default HEAD)"
+        required: false
+        default: ""
+      allow_missing_smokes:
+        description: "Allow missing smoke runs for the commit"
+        required: false
+        default: "true"
+
+jobs:
+  check:
+    name: evaluate release readiness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run go/no-go check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT_INPUT="${{ inputs.commit }}"
+          if [[ -z "${COMMIT_INPUT}" ]]; then
+            COMMIT_INPUT="${GITHUB_SHA}"
+          fi
+          EXTRA_ARGS=""
+          if [[ "${{ inputs.allow_missing_smokes }}" == "true" ]]; then
+            EXTRA_ARGS="--allow-missing-smokes"
+          fi
+          python scripts/go_no_go_check.py --commit "${COMMIT_INPUT}" ${EXTRA_ARGS} | tee /tmp/go-no-go-report.md
+
+      - name: Upload go/no-go report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-no-go-report
+          path: /tmp/go-no-go-report.md
