@@ -83,3 +83,8 @@ Operational notes:
 5. Ensure latest DAST report (`dast-smoke.yml`) is available and reviewed.
 6. Run DR restore smoke (`scripts/dr_restore_smoke.sh`).
 7. Confirm CI pipeline green.
+
+## Release Evidence
+- Build release evidence package using:
+  - `docs/ops/release-evidence-pack-v1.md`
+- Attach workflow URLs and artifacts for CI, Deploy, SLO/DAST/Security/DR smoke.
