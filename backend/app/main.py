@@ -48,6 +48,7 @@ from app.observability import (
 )
 from app.store_factory import create_generation_store
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
+from app.telemetry import get_tracer, init_tracing
 
 
 def _hash_key(value: str) -> str:
@@ -198,6 +199,7 @@ V1_RATE_LIMIT_PER_MINUTE = int(os.environ.get("DOCX_SERVICE_V1_RATE_LIMIT_PER_MI
 
 _v1_rate_limit_lock = threading.Lock()
 _v1_rate_limit_counters: dict[str, tuple[datetime, int]] = {}
+TRACER = get_tracer("docx-service.api")
 
 
 def _persist_templates() -> None:
@@ -415,24 +417,30 @@ async def _process_v1_generation_job(job_id: uuid.UUID) -> None:
     store = _ensure_production_store()
     rec = store.get_generation(job_id)
     started = perf_counter()
-    try:
-        store.mark_running(job_id)
-        version = _resolve_published_version_for_v1(rec.document_id, rec.version_id)
-        fn, data = render_version_to_docx(
-            docx_bytes=version.get("docx_bytes"),
-            docx_template_body=version["docx_template_body"],
-            bindings_json=version["bindings_json"],
-            rules_json=version["rules_json"],
-            payload_json=rec.payload_json,
-            conditional_blocks=version.get("conditional_blocks") or [],
-        )
-        store.mark_succeeded(job_id, fn, data)
-        GENERATION_TOTAL.labels(mode="async", status="succeeded").inc()
-        GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
-    except Exception as exc:  # noqa: BLE001
-        store.mark_failed(job_id, "generation_error", str(exc))
-        GENERATION_TOTAL.labels(mode="async", status="failed").inc()
-        GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
+    with TRACER.start_as_current_span("generation.async.worker") as span:
+        span.set_attribute("generation.job_id", str(job_id))
+        span.set_attribute("generation.mode", "async")
+        span.set_attribute("generation.document_id", str(rec.document_id))
+        span.set_attribute("generation.version_id", str(rec.version_id))
+        try:
+            store.mark_running(job_id)
+            version = _resolve_published_version_for_v1(rec.document_id, rec.version_id)
+            fn, data = render_version_to_docx(
+                docx_bytes=version.get("docx_bytes"),
+                docx_template_body=version["docx_template_body"],
+                bindings_json=version["bindings_json"],
+                rules_json=version["rules_json"],
+                payload_json=rec.payload_json,
+                conditional_blocks=version.get("conditional_blocks") or [],
+            )
+            store.mark_succeeded(job_id, fn, data)
+            GENERATION_TOTAL.labels(mode="async", status="succeeded").inc()
+            GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            span.record_exception(exc)
+            store.mark_failed(job_id, "generation_error", str(exc))
+            GENERATION_TOTAL.labels(mode="async", status="failed").inc()
+            GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
 
 
 async def _v1_worker_loop() -> None:
@@ -449,6 +457,7 @@ async def _v1_worker_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global templates, template_versions, worker_task, v1_worker_task, production_store, job_queue, v1_job_queue
+    init_tracing()
     loaded = try_load_templates(STORE_PATH)
     if loaded:
         templates, template_versions = loaded
@@ -499,34 +508,43 @@ app.add_middleware(
 @app.middleware("http")
 async def v1_request_size_guard(request: Request, call_next):
     started = perf_counter()
-    if request.url.path.startswith("/api/v1/") and request.method.upper() in {"POST", "PUT", "PATCH"}:
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > V1_MAX_REQUEST_BYTES:
-                    return JSONResponse(
-                        status_code=413,
-                        content={
-                            "code": "request_too_large",
-                            "message": "Request payload exceeds maximum allowed size.",
-                            "requestId": request.headers.get("x-request-id"),
-                        },
-                    )
-            except ValueError:
-                pass
-    response = await call_next(request)
-    if request.url.path.startswith("/api/v1/"):
-        elapsed = perf_counter() - started
-        HTTP_V1_REQUESTS_TOTAL.labels(
-            method=request.method.upper(),
-            path=request.url.path,
-            status_code=str(response.status_code),
-        ).inc()
-        HTTP_V1_REQUEST_DURATION_SECONDS.labels(
-            method=request.method.upper(),
-            path=request.url.path,
-        ).observe(elapsed)
-    return response
+    span_name = f"http {request.method.upper()} {request.url.path}"
+    with TRACER.start_as_current_span(span_name) as span:
+        span.set_attribute("http.method", request.method.upper())
+        span.set_attribute("http.path", request.url.path)
+        request_id = request.headers.get("x-request-id")
+        if request_id:
+            span.set_attribute("http.request_id", request_id)
+        if request.url.path.startswith("/api/v1/") and request.method.upper() in {"POST", "PUT", "PATCH"}:
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > V1_MAX_REQUEST_BYTES:
+                        span.set_attribute("http.status_code", 413)
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "code": "request_too_large",
+                                "message": "Request payload exceeds maximum allowed size.",
+                                "requestId": request_id,
+                            },
+                        )
+                except ValueError:
+                    pass
+        response = await call_next(request)
+        if request.url.path.startswith("/api/v1/"):
+            elapsed = perf_counter() - started
+            HTTP_V1_REQUESTS_TOTAL.labels(
+                method=request.method.upper(),
+                path=request.url.path,
+                status_code=str(response.status_code),
+            ).inc()
+            HTTP_V1_REQUEST_DURATION_SECONDS.labels(
+                method=request.method.upper(),
+                path=request.url.path,
+            ).observe(elapsed)
+        span.set_attribute("http.status_code", response.status_code)
+        return response
 
 
 @app.exception_handler(HTTPException)

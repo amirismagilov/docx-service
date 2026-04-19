@@ -28,6 +28,8 @@
 - `docs/security/security-contours.md` — baseline/enhanced security контуры и go-live критерии.
 - `docs/engineering/render-engine-hardening.md` — план усиления рендер-движка и бенчмарки.
 - `docs/observability/analytics-audit-model.md` — модель статистики и аудита.
+- `docs/observability/otel-setup.md` — настройка OpenTelemetry tracing.
+- `docs/observability/grafana/docx-v1-overview.dashboard.json` — готовый Grafana dashboard.
 - `docs/data-model/schema-v1.sql` — черновой SQL-дизайн схемы данных v1.
 - `docs/testing/test-strategy-v1.md` — полная тест-стратегия.
 - `docs/e2e-test-cases.md` — каталог E2E кейсов.
