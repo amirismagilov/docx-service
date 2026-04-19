@@ -38,9 +38,17 @@ class PostgresStore:
         self._conn = psycopg.connect(dsn, row_factory=dict_row)
         self._result_dir = result_dir
         result_dir.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
 
     def close(self) -> None:
         self._conn.close()
+
+    def _init_schema(self) -> None:
+        migration = Path(__file__).resolve().parent.parent / "migrations" / "001_generation_store_postgres.sql"
+        schema_sql = migration.read_text(encoding="utf-8")
+        with self._conn.cursor() as cur:
+            cur.execute(schema_sql)
+        self._conn.commit()
 
     def create_generation(
         self,

@@ -16,12 +16,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import json
-
 import httpx
-from fastapi import Body, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, Field
 
 from app.dkp_fields import DKP_FIELDS, dkp_schema_json, dkp_starter_template_text
@@ -180,6 +179,9 @@ PROD_RESULTS_DIR = Path(
 )
 GENERATION_STORE_BACKEND = os.environ.get("DOCX_SERVICE_GENERATION_STORE", "sqlite")
 POSTGRES_DSN = os.environ.get("DOCX_SERVICE_PG_DSN")
+V1_AUTH_REQUIRED = os.environ.get("DOCX_SERVICE_V1_AUTH_REQUIRED", "1").strip().lower() not in {"0", "false", "no"}
+V1_AUTH_TOKEN = os.environ.get("DOCX_SERVICE_V1_BEARER_TOKEN", "dev-v1-token")
+STRICT_LEGACY_SCHEMA = os.environ.get("DOCX_SERVICE_STRICT_LEGACY_SCHEMA", "0").strip().lower() in {"1", "true", "yes"}
 
 
 def _persist_templates() -> None:
@@ -316,6 +318,53 @@ def _resolve_published_version_for_v1(document_id: uuid.UUID, version_id: uuid.U
     if v["status"] != VERSION_STATUS_PUBLISHED:
         raise HTTPException(status_code=400, detail="Publish document version before generation.")
     return v
+
+
+def _require_v1_authorization(authorization: str | None = Header(None, alias="Authorization")) -> str:
+    if not V1_AUTH_REQUIRED:
+        return "auth-disabled"
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authorization must be Bearer token.")
+    token = parts[1].strip()
+    if not token or not secrets.compare_digest(token, V1_AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid bearer token.")
+    return "service-token"
+
+
+def _validate_payload_for_version(version: dict[str, Any], payload: dict[str, Any]) -> None:
+    t = templates.get(version["template_id"])
+    schema_raw = (t or {}).get("schema_json")
+    if not schema_raw:
+        return
+    try:
+        parsed = json.loads(schema_raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Payload must be a JSON object.")
+
+    # JSON Schema mode (industrial target).
+    if isinstance(parsed, dict) and parsed.get("type") == "object":
+        validator = Draft202012Validator(parsed)
+        errors = sorted(validator.iter_errors(payload), key=lambda e: list(e.path))
+        if errors:
+            msg = "; ".join(e.message for e in errors[:3])
+            raise HTTPException(status_code=422, detail=f"Payload schema validation failed: {msg}")
+        return
+
+    # Legacy schema mode (MVP map: {fieldId: {...}}).
+    if isinstance(parsed, dict):
+        allowed_keys = {str(k) for k in parsed.keys()}
+        if STRICT_LEGACY_SCHEMA:
+            unknown = sorted(set(payload.keys()) - allowed_keys)
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Payload contains fields not declared in schema: {', '.join(unknown[:10])}",
+                )
 
 
 def _ensure_production_store() -> GenerationStore:
@@ -1339,9 +1388,11 @@ def generate_sync_v1(
     body: GenerateSyncV1Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     request_id: str | None = Header(None, alias="X-Request-Id"),
+    _actor: str = Depends(_require_v1_authorization),
 ) -> Response:
     req_id = request_id or str(uuid.uuid4())
     version = _resolve_published_version_for_v1(body.documentId, body.versionId)
+    _validate_payload_for_version(version, body.payload)
     store = _ensure_production_store()
     if idempotency_key:
         existing = store.find_by_idempotency_key(
@@ -1394,9 +1445,11 @@ async def generate_async_v1(
     body: GenerateAsyncV1Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     request_id: str | None = Header(None, alias="X-Request-Id"),
+    _actor: str = Depends(_require_v1_authorization),
 ) -> JSONResponse:
     req_id = request_id or str(uuid.uuid4())
     version = _resolve_published_version_for_v1(body.documentId, body.versionId)
+    _validate_payload_for_version(version, body.payload)
     store = _ensure_production_store()
     if idempotency_key:
         existing = store.find_by_idempotency_key(
@@ -1437,7 +1490,7 @@ async def generate_async_v1(
 
 
 @app.get("/api/v1/generations/{job_id}")
-def get_generation_v1(job_id: uuid.UUID) -> dict[str, Any]:
+def get_generation_v1(job_id: uuid.UUID, _actor: str = Depends(_require_v1_authorization)) -> dict[str, Any]:
     store = _ensure_production_store()
     try:
         rec = store.get_generation(job_id)
@@ -1447,7 +1500,7 @@ def get_generation_v1(job_id: uuid.UUID) -> dict[str, Any]:
 
 
 @app.get("/api/v1/generations/{job_id}/result")
-def get_generation_result_v1(job_id: uuid.UUID) -> Response:
+def get_generation_result_v1(job_id: uuid.UUID, _actor: str = Depends(_require_v1_authorization)) -> Response:
     store = _ensure_production_store()
     try:
         rec = store.get_generation(job_id)
@@ -1466,7 +1519,10 @@ def get_generation_result_v1(job_id: uuid.UUID) -> Response:
 
 
 @app.get("/api/v1/documents/{document_id}/statistics")
-def get_document_statistics_v1(document_id: uuid.UUID) -> dict[str, Any]:
+def get_document_statistics_v1(
+    document_id: uuid.UUID,
+    _actor: str = Depends(_require_v1_authorization),
+) -> dict[str, Any]:
     store = _ensure_production_store()
     return store.get_document_statistics(document_id)
 

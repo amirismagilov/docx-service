@@ -3,6 +3,10 @@ services:
     image: python:3.12-slim
     working_dir: /app/backend
     command: sh -c "pip install -q -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      DOCX_SERVICE_GENERATION_STORE: postgres
+      DOCX_SERVICE_PG_DSN: postgresql://docx:docx@postgres:5432/docx_service
+      DOCX_SERVICE_V1_BEARER_TOKEN: dev-v1-token
     volumes:
       - ./:/app
     ports:
@@ -10,6 +14,7 @@ services:
     depends_on:
       - redis
       - minio
+      - postgres
 
   web:
     image: node:20
@@ -38,3 +43,17 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: docx_service
+      POSTGRES_USER: docx
+      POSTGRES_PASSWORD: docx
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

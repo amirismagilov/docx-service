@@ -57,6 +57,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 - `DOCX_SERVICE_DB_PATH=/path/to/production.db` (для sqlite)
 - `DOCX_SERVICE_RESULTS_DIR=/path/to/generated` (каталог артефактов)
 - `DOCX_SERVICE_PG_DSN=postgresql://...` (обязательно при `postgres`)
+- `DOCX_SERVICE_V1_AUTH_REQUIRED=1|0` (по умолчанию `1`)
+- `DOCX_SERVICE_V1_BEARER_TOKEN=<token>` (Bearer-токен для `/api/v1/*`)
+- `DOCX_SERVICE_STRICT_LEGACY_SCHEMA=1|0` (жёсткая проверка legacy schema по ключам)
 
 Frontend:
 
