@@ -103,6 +103,12 @@ cd frontend
 npm run build
 ```
 
+## CI/CD заметки
+
+- `CI` workflow проверяет backend/frontend, OpenAPI и dependency audits.
+- `Deploy` workflow теперь делает повторную попытку деплоя при transient-сбоях.
+- `SLO Smoke` workflow (`workflow_dispatch` + nightly schedule) поднимает backend и прогоняет k6 сценарии из `perf/k6`.
+
 ## Основные сценарии API
 
 ### Управление шаблонами
