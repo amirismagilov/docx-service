@@ -1,0 +1,49 @@
+name: Release Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit SHA (optional, default HEAD)"
+        required: false
+        default: ""
+      owner:
+        description: "Evidence owner"
+        required: false
+        default: "release-owner"
+
+jobs:
+  generate:
+    name: generate release evidence
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ensure GitHub CLI is available
+        run: gh --version
+
+      - name: Generate evidence markdown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT_INPUT="${{ inputs.commit }}"
+          if [[ -z "${COMMIT_INPUT}" ]]; then
+            COMMIT_INPUT="${GITHUB_SHA}"
+          fi
+          python scripts/generate_release_evidence.py \
+            --commit "${COMMIT_INPUT}" \
+            --owner "${{ inputs.owner }}" \
+            --output /tmp/release-evidence.md
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence
+          path: /tmp/release-evidence.md

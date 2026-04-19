@@ -44,6 +44,7 @@
 - `scripts/backup_generation_store.sh` — создание backup bundle generation store + artifacts.
 - `scripts/dr_restore_smoke.sh` — DR restore smoke для backup bundle.
 - `scripts/security_smoke.sh` — security smoke для auth/size/rate-limit проверок.
+- `scripts/generate_release_evidence.py` — генерация markdown evidence record по workflow run ссылкам.
 
 ## Быстрый старт
 
@@ -117,6 +118,7 @@ npm run build
 - `DR Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет backup/restore smoke сценарий и сохраняет backup bundle как artifact.
 - `DAST Smoke` workflow (`workflow_dispatch` + nightly schedule) выполняет OWASP ZAP baseline и сохраняет security reports.
 - `Security Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет базовые security anti-regressions (`401/413/429`).
+- `Release Evidence` workflow (`workflow_dispatch`) генерирует release evidence markdown и сохраняет как artifact.
 
 ## Основные сценарии API
 

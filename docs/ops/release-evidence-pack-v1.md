@@ -74,6 +74,19 @@ Approvals:
 - Operations: <name/date>
 ```
 
+## Automated Draft Generation
+Generate a release evidence draft with workflow URLs for a commit:
+```bash
+python scripts/generate_release_evidence.py --commit <sha> --owner "<name>"
+```
+
+Default output:
+- `docs/ops/evidence/release-<sha>.md`
+
+GitHub Actions option:
+- Run `Release Evidence` workflow (`.github/workflows/release-evidence.yml`) with optional `commit` and `owner` inputs.
+- Download artifact `release-evidence` and attach it to release materials.
+
 ## Storage and Retention
 - Store evidence pack alongside release artifacts in immutable release storage.
 - Keep at least one year of release evidence history.
