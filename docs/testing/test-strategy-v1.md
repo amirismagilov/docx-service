@@ -89,7 +89,7 @@ Types:
 2. Unit tests.
 3. Integration tests.
 4. Contract tests.
-5. Security scans.
+5. Security scans (dependency audits + DAST smoke + security smoke abuse checks).
 6. Smoke e2e.
 
 Release gates:

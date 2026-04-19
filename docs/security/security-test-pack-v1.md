@@ -9,6 +9,8 @@ Provide a repeatable minimum security validation set for each release candidate.
   - Frontend: `npm audit --audit-level=high`
 - DAST smoke workflow:
   - `.github/workflows/dast-smoke.yml`
+- Security abuse smoke workflow:
+  - `.github/workflows/security-smoke.yml`
 - Auth and abuse regression:
   - Unauthorized access returns `401`.
   - Request size guard returns `413`.

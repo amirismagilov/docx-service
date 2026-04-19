@@ -42,6 +42,7 @@
 - `scripts/canary_smoke.sh` — автоматизированный canary smoke script.
 - `scripts/backup_generation_store.sh` — создание backup bundle generation store + artifacts.
 - `scripts/dr_restore_smoke.sh` — DR restore smoke для backup bundle.
+- `scripts/security_smoke.sh` — security smoke для auth/size/rate-limit проверок.
 
 ## Быстрый старт
 
@@ -114,6 +115,7 @@ npm run build
 - `SLO Smoke` workflow (`workflow_dispatch` + nightly schedule) поднимает backend и прогоняет k6 сценарии из `perf/k6`.
 - `DR Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет backup/restore smoke сценарий и сохраняет backup bundle как artifact.
 - `DAST Smoke` workflow (`workflow_dispatch` + nightly schedule) выполняет OWASP ZAP baseline и сохраняет security reports.
+- `Security Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет базовые security anti-regressions (`401/413/429`).
 
 ## Основные сценарии API
 

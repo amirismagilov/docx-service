@@ -1,0 +1,55 @@
+name: Security Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 3 * * *"
+
+jobs:
+  security-smoke:
+    name: auth and abuse smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Start backend
+        working-directory: backend
+        env:
+          DOCX_SERVICE_GENERATION_STORE: sqlite
+          DOCX_SERVICE_V1_BEARER_TOKEN: dev-v1-token
+          DOCX_SERVICE_V1_MAX_REQUEST_BYTES: "1000000"
+          DOCX_SERVICE_V1_RATE_LIMIT_PER_MINUTE: "1"
+          DOCX_SERVICE_OTEL_ENABLED: "0"
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 >/tmp/docx-backend.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend did not become healthy in time"
+          cat /tmp/docx-backend.log || true
+          exit 1
+
+      - name: Run security smoke script
+        env:
+          BASE_URL: http://127.0.0.1:8080
+          BEARER_TOKEN: dev-v1-token
+          LARGE_PAYLOAD_SIZE: "1200000"
+        run: ./scripts/security_smoke.sh
+
+      - name: Print backend log on failure
+        if: failure()
+        run: cat /tmp/docx-backend.log || true

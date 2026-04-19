@@ -79,5 +79,7 @@ Operational notes:
 1. Run backend tests (`pytest`).
 2. Validate OpenAPI (`python scripts/validate_openapi.py`).
 3. Run perf smoke (`k6` sync scenario).
-4. Run DR restore smoke (`scripts/dr_restore_smoke.sh`).
-5. Confirm CI pipeline green.
+4. Run security smoke (`scripts/security_smoke.sh`) on staging-like config.
+5. Ensure latest DAST report (`dast-smoke.yml`) is available and reviewed.
+6. Run DR restore smoke (`scripts/dr_restore_smoke.sh`).
+7. Confirm CI pipeline green.
