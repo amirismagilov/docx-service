@@ -71,6 +71,12 @@ curl -H "Authorization: Bearer dev-v1-token" \
   "http://localhost:8080/api/v1/documents/11111111-1111-1111-1111-111111111111/statistics"
 ```
 
+Audit events (who/when/result metadata):
+```bash
+curl -H "Authorization: Bearer dev-v1-token" \
+  "http://localhost:8080/api/v1/documents/11111111-1111-1111-1111-111111111111/events?fromUtc=2026-01-01T00:00:00Z&toUtc=2026-12-31T23:59:59Z&limit=100"
+```
+
 ## 4) Error model
 
 `/api/v1/*` uses standard error envelope:
@@ -91,6 +97,7 @@ Common codes:
 
 ## 5) Operational recommendations
 - Always send `X-Request-Id`.
+- Validate `X-Request-Id` returned by API responses for cross-system tracing.
 - Use `Idempotency-Key` on retries.
 - Prefer async for large templates/documents.
 - Monitor status latency and failure rates.

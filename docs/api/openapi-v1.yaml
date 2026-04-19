@@ -457,6 +457,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/DocumentStatisticsResponse"
 
+  /documents/{documentId}/events:
+    parameters:
+      - $ref: "#/components/parameters/DocumentId"
+    get:
+      tags: [Statistics]
+      summary: Get document audit events
+      operationId: getDocumentEvents
+      parameters:
+        - in: query
+          name: fromUtc
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: toUtc
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Audit events for document generation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentEventsResponse"
+
 components:
   securitySchemes:
     OAuth2ClientCredentials:
@@ -884,6 +917,47 @@ components:
                 format: uuid
               calls:
                 type: integer
+        dailyBuckets:
+          type: array
+          items:
+            type: object
+            required: [day, calls]
+            properties:
+              day:
+                type: string
+              calls:
+                type: integer
+    AuditEvent:
+      type: object
+      required: [eventType, severity, actorId, requestId, metadata, createdAtUtc]
+      properties:
+        eventType:
+          type: string
+        severity:
+          type: string
+        actorId:
+          type: string
+        requestId:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAtUtc:
+          type: string
+          format: date-time
+    DocumentEventsResponse:
+      type: object
+      required: [documentId, count, events]
+      properties:
+        documentId:
+          type: string
+          format: uuid
+        count:
+          type: integer
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
     ApiError:
       type: object
       required: [code, message, requestId]

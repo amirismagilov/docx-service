@@ -370,6 +370,54 @@ class ProductionStore:
             "dailyBuckets": [{"day": row["day"], "calls": int(row["calls"])} for row in daily_rows],
         }
 
+    def get_document_events(
+        self,
+        document_id: uuid.UUID,
+        *,
+        from_utc: datetime | None = None,
+        to_utc: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where = ["generation_request_id in (select id from generation_requests where document_id = ?)"]
+        params: list[Any] = [str(document_id)]
+        if from_utc is not None:
+            where.append("created_at_utc >= ?")
+            params.append(from_utc.isoformat().replace("+00:00", "Z"))
+        if to_utc is not None:
+            where.append("created_at_utc <= ?")
+            params.append(to_utc.isoformat().replace("+00:00", "Z"))
+        where_sql = " and ".join(where)
+        capped_limit = max(1, min(limit, 500))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                select event_type, severity, actor_id, request_id, metadata_json, created_at_utc
+                from audit_events
+                where {where_sql}
+                order by created_at_utc desc
+                limit ?
+                """,
+                tuple(params) + (capped_limit,),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row["metadata_json"] or "{}"
+            try:
+                metadata = json.loads(metadata_raw)
+            except json.JSONDecodeError:
+                metadata = {"raw": metadata_raw}
+            out.append(
+                {
+                    "eventType": row["event_type"],
+                    "severity": row["severity"],
+                    "actorId": row["actor_id"],
+                    "requestId": row["request_id"],
+                    "metadata": metadata,
+                    "createdAtUtc": row["created_at_utc"],
+                }
+            )
+        return out
+
     def _row_to_record(self, row: sqlite3.Row) -> GenerationRecord:
         return GenerationRecord(
             id=uuid.UUID(row["id"]),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -49,6 +50,8 @@ from app.observability import (
 from app.store_factory import create_generation_store
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
 from app.telemetry import get_tracer, init_tracing
+
+LOGGER = logging.getLogger("docx_service.api")
 
 
 def _hash_key(value: str) -> str:
@@ -512,9 +515,9 @@ async def v1_request_size_guard(request: Request, call_next):
     with TRACER.start_as_current_span(span_name) as span:
         span.set_attribute("http.method", request.method.upper())
         span.set_attribute("http.path", request.url.path)
-        request_id = request.headers.get("x-request-id")
-        if request_id:
-            span.set_attribute("http.request_id", request_id)
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        span.set_attribute("http.request_id", request_id)
         if request.url.path.startswith("/api/v1/") and request.method.upper() in {"POST", "PUT", "PATCH"}:
             content_length = request.headers.get("content-length")
             if content_length:
@@ -532,6 +535,7 @@ async def v1_request_size_guard(request: Request, call_next):
                 except ValueError:
                     pass
         response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
         if request.url.path.startswith("/api/v1/"):
             elapsed = perf_counter() - started
             HTTP_V1_REQUESTS_TOTAL.labels(
@@ -543,6 +547,20 @@ async def v1_request_size_guard(request: Request, call_next):
                 method=request.method.upper(),
                 path=request.url.path,
             ).observe(elapsed)
+            LOGGER.info(
+                json.dumps(
+                    {
+                        "event": "http_request",
+                        "requestId": request_id,
+                        "method": request.method.upper(),
+                        "path": request.url.path,
+                        "statusCode": response.status_code,
+                        "latencyMs": round(elapsed * 1000, 2),
+                        "clientIp": request.client.host if request.client else None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         span.set_attribute("http.status_code", response.status_code)
         return response
 
@@ -551,28 +569,36 @@ async def v1_request_size_guard(request: Request, call_next):
 async def http_exception_handler(request: Request, exc: HTTPException):
     if request.url.path.startswith("/api/v1/"):
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
-        return JSONResponse(
+        req_id = getattr(request.state, "request_id", request.headers.get("x-request-id"))
+        response = JSONResponse(
             status_code=exc.status_code,
             content={
                 "code": f"http_{exc.status_code}",
                 "message": detail,
-                "requestId": request.headers.get("x-request-id"),
+                "requestId": req_id,
             },
         )
+        if req_id:
+            response.headers["X-Request-Id"] = req_id
+        return response
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     if request.url.path.startswith("/api/v1/"):
-        return JSONResponse(
+        req_id = getattr(request.state, "request_id", request.headers.get("x-request-id"))
+        response = JSONResponse(
             status_code=500,
             content={
                 "code": "internal_error",
                 "message": "Internal server error.",
-                "requestId": request.headers.get("x-request-id"),
+                "requestId": req_id,
             },
         )
+        if req_id:
+            response.headers["X-Request-Id"] = req_id
+        return response
     raise exc
 
 
@@ -1653,6 +1679,23 @@ def get_document_statistics_v1(
 ) -> dict[str, Any]:
     store = _ensure_production_store()
     return store.get_document_statistics(document_id, from_utc=fromUtc, to_utc=toUtc)
+
+
+@app.get("/api/v1/documents/{document_id}/events")
+def get_document_events_v1(
+    document_id: uuid.UUID,
+    fromUtc: datetime | None = None,
+    toUtc: datetime | None = None,
+    limit: int = 100,
+    _actor: str = Depends(_require_v1_authorization),
+) -> dict[str, Any]:
+    store = _ensure_production_store()
+    events = store.get_document_events(document_id, from_utc=fromUtc, to_utc=toUtc, limit=limit)
+    return {
+        "documentId": str(document_id),
+        "count": len(events),
+        "events": events,
+    }
 
 
 @app.get("/metrics")

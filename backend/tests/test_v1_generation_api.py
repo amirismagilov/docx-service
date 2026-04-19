@@ -233,3 +233,44 @@ def test_metrics_endpoint_exposes_prometheus_format() -> None:
         metrics = client.get("/metrics")
         assert metrics.status_code == 200
         assert "docx_v1_http_requests_total" in metrics.text
+
+
+def test_v1_document_events_endpoint_returns_audit_history() -> None:
+    _reset_state()
+    with TestClient(app) as client:
+        boot = client.post("/api/templates/bootstrap-empty", json={"name": "Doc"})
+        tid = boot.json()["templateId"]
+        vid = boot.json()["versionId"]
+        raw = build_docx_from_plain_text("Hello {{name}}")
+        client.post(
+            f"/api/templates/{tid}/versions/{vid}/upload-docx",
+            files={"file": ("template.docx", raw, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        )
+        queued = client.post(
+            "/api/v1/generations/async",
+            headers={"X-Request-Id": "events-req-1", **AUTH_HEADERS},
+            json={"documentId": tid, "versionId": vid, "payload": {"name": "A"}},
+        )
+        assert queued.status_code == 202
+
+        events = client.get(
+            f"/api/v1/documents/{tid}/events?fromUtc=2020-01-01T00:00:00Z&toUtc=2035-01-01T00:00:00Z&limit=10",
+            headers=AUTH_HEADERS,
+        )
+        assert events.status_code == 200
+        body = events.json()
+        assert body["documentId"] == tid
+        assert body["count"] >= 1
+        assert isinstance(body["events"], list)
+        assert any(item["eventType"] == "generation.queued" for item in body["events"])
+
+
+def test_v1_middleware_sets_request_id_header() -> None:
+    _reset_state()
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/documents/00000000-0000-0000-0000-000000000000/statistics",
+            headers=AUTH_HEADERS,
+        )
+        assert response.status_code in (200, 404)
+        assert response.headers.get("x-request-id")

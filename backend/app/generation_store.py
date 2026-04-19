@@ -79,6 +79,15 @@ class GenerationStore(Protocol):
         to_utc: datetime | None = None,
     ) -> dict[str, Any]: ...
 
+    def get_document_events(
+        self,
+        document_id: uuid.UUID,
+        *,
+        from_utc: datetime | None = None,
+        to_utc: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
 
 def percentile(values: list[int], p: int) -> int:
     if not values:
