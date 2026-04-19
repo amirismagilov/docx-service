@@ -1,0 +1,89 @@
+name: DR Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 4 * * *"
+
+jobs:
+  dr-smoke:
+    name: backup and restore smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Start backend
+        working-directory: backend
+        env:
+          DOCX_SERVICE_GENERATION_STORE: sqlite
+          DOCX_SERVICE_DB_PATH: /tmp/docx-production.db
+          DOCX_SERVICE_RESULTS_DIR: /tmp/docx-results
+          DOCX_SERVICE_V1_BEARER_TOKEN: dev-v1-token
+          DOCX_SERVICE_OTEL_ENABLED: "0"
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8080 >/tmp/docx-backend.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend did not become healthy in time"
+          cat /tmp/docx-backend.log || true
+          exit 1
+
+      - name: Seed generation data
+        run: |
+          set -e
+          JSON=$(curl -fsS -X POST http://127.0.0.1:8080/api/templates/bootstrap-empty \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"DR Smoke Template"}')
+          TEMPLATE_ID=$(python -c "import json,sys; print(json.loads(sys.argv[1])['templateId'])" "$JSON")
+          VERSION_ID=$(python -c "import json,sys; print(json.loads(sys.argv[1])['versionId'])" "$JSON")
+          curl -fsS -X PUT "http://127.0.0.1:8080/api/templates/${TEMPLATE_ID}/versions/${VERSION_ID}/editor-text" \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"DR {{field_1}}"}' >/dev/null
+          curl -fsS -X POST "http://127.0.0.1:8080/api/templates/${TEMPLATE_ID}/versions/${VERSION_ID}/publish" >/dev/null
+          curl -fsS -X POST http://127.0.0.1:8080/api/v1/generations/sync \
+            -H 'Authorization: Bearer dev-v1-token' \
+            -H 'Content-Type: application/json' \
+            -H 'X-Request-Id: dr-smoke-ci' \
+            -d "{\"documentId\":\"${TEMPLATE_ID}\",\"versionId\":\"${VERSION_ID}\",\"payload\":{\"field_1\":\"ok\"}}" \
+            -o /tmp/docx-dr-smoke.docx
+
+      - name: Run backup script
+        env:
+          DOCX_SERVICE_GENERATION_STORE: sqlite
+          DOCX_SERVICE_DB_PATH: /tmp/docx-production.db
+          DOCX_SERVICE_RESULTS_DIR: /tmp/docx-results
+          BACKUP_ROOT: /tmp/docx-service-backups
+          TIMESTAMP: dr-smoke-ci
+        run: ./scripts/backup_generation_store.sh
+
+      - name: Run restore smoke
+        env:
+          BACKUP_DIR: /tmp/docx-service-backups/dr-smoke-ci
+          RESTORE_ROOT: /tmp/docx-service-dr-restore
+        run: ./scripts/dr_restore_smoke.sh
+
+      - name: Upload backup bundle artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-smoke-backup-bundle
+          path: /tmp/docx-service-backups/dr-smoke-ci
+
+      - name: Print backend log on failure
+        if: failure()
+        run: cat /tmp/docx-backend.log || true

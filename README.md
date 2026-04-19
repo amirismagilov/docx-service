@@ -110,6 +110,7 @@ npm run build
 - `CI` workflow проверяет backend/frontend, OpenAPI и dependency audits.
 - `Deploy` workflow теперь делает повторную попытку деплоя при transient-сбоях.
 - `SLO Smoke` workflow (`workflow_dispatch` + nightly schedule) поднимает backend и прогоняет k6 сценарии из `perf/k6`.
+- `DR Smoke` workflow (`workflow_dispatch` + nightly schedule) проверяет backup/restore smoke сценарий и сохраняет backup bundle как artifact.
 
 ## Основные сценарии API
 
