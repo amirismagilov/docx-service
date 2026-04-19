@@ -6,6 +6,7 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.docx_ops import build_docx_from_plain_text
 from app.main import PROD_DB_PATH, PROD_RESULTS_DIR, app, jobs, template_versions, templates
 
@@ -21,6 +22,7 @@ def _reset_state() -> None:
         PROD_DB_PATH.unlink()
     if PROD_RESULTS_DIR.exists():
         shutil.rmtree(PROD_RESULTS_DIR)
+    main_module._v1_rate_limit_counters.clear()
 
 
 def test_v1_sync_generation_returns_docx_and_supports_idempotency() -> None:
@@ -170,3 +172,29 @@ def test_v1_payload_validation_rejects_invalid_json_schema_payload() -> None:
             json={"documentId": tid, "versionId": vid, "payload": {"name": "X", "age": "not-int"}},
         )
         assert invalid.status_code == 422
+
+
+def test_v1_request_size_guard_returns_413() -> None:
+    _reset_state()
+    with TestClient(app) as client:
+        large_payload = "x" * (main_module.V1_MAX_REQUEST_BYTES + 10)
+        response = client.post(
+            "/api/v1/generations/sync",
+            headers=AUTH_HEADERS,
+            json={"documentId": "00000000-0000-0000-0000-000000000000", "payload": {"blob": large_payload}},
+        )
+        assert response.status_code == 413
+
+
+def test_v1_rate_limit_returns_429() -> None:
+    _reset_state()
+    original = main_module.V1_RATE_LIMIT_PER_MINUTE
+    main_module.V1_RATE_LIMIT_PER_MINUTE = 1
+    try:
+        with TestClient(app) as client:
+            first = client.get("/api/v1/documents/00000000-0000-0000-0000-000000000000/statistics", headers=AUTH_HEADERS)
+            assert first.status_code in (200, 404)
+            second = client.get("/api/v1/documents/00000000-0000-0000-0000-000000000000/statistics", headers=AUTH_HEADERS)
+            assert second.status_code == 429
+    finally:
+        main_module.V1_RATE_LIMIT_PER_MINUTE = original

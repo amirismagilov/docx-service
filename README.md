@@ -24,6 +24,7 @@
 
 - `docs/adr/0001-industrial-architecture.md` — целевая архитектура и ключевые решения.
 - `docs/api/openapi-v1.yaml` — контракт API v1 для интеграции.
+- `docs/api/integration-guide-v1.md` — практический гайд подключения к API v1.
 - `docs/security/security-contours.md` — baseline/enhanced security контуры и go-live критерии.
 - `docs/engineering/render-engine-hardening.md` — план усиления рендер-движка и бенчмарки.
 - `docs/observability/analytics-audit-model.md` — модель статистики и аудита.
@@ -31,6 +32,8 @@
 - `docs/testing/test-strategy-v1.md` — полная тест-стратегия.
 - `docs/e2e-test-cases.md` — каталог E2E кейсов.
 - `docs/roadmap/industrial-v1-delivery-roadmap.md` — поэтапный delivery roadmap.
+- `docs/ops/runbook-v1.md` — эксплуатационный runbook для v1.
+- `perf/README.md` — нагрузочные smoke/burst сценарии на k6.
 
 ## Быстрый старт
 

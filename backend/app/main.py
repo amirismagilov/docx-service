@@ -8,16 +8,17 @@ import json
 import os
 import re
 import secrets
+import threading
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from jsonschema import Draft202012Validator
@@ -182,6 +183,11 @@ POSTGRES_DSN = os.environ.get("DOCX_SERVICE_PG_DSN")
 V1_AUTH_REQUIRED = os.environ.get("DOCX_SERVICE_V1_AUTH_REQUIRED", "1").strip().lower() not in {"0", "false", "no"}
 V1_AUTH_TOKEN = os.environ.get("DOCX_SERVICE_V1_BEARER_TOKEN", "dev-v1-token")
 STRICT_LEGACY_SCHEMA = os.environ.get("DOCX_SERVICE_STRICT_LEGACY_SCHEMA", "0").strip().lower() in {"1", "true", "yes"}
+V1_MAX_REQUEST_BYTES = int(os.environ.get("DOCX_SERVICE_V1_MAX_REQUEST_BYTES", str(1024 * 1024)))
+V1_RATE_LIMIT_PER_MINUTE = int(os.environ.get("DOCX_SERVICE_V1_RATE_LIMIT_PER_MINUTE", "120"))
+
+_v1_rate_limit_lock = threading.Lock()
+_v1_rate_limit_counters: dict[str, tuple[datetime, int]] = {}
 
 
 def _persist_templates() -> None:
@@ -320,9 +326,23 @@ def _resolve_published_version_for_v1(document_id: uuid.UUID, version_id: uuid.U
     return v
 
 
+def _enforce_v1_rate_limit(principal: str) -> None:
+    now = datetime.now(timezone.utc)
+    with _v1_rate_limit_lock:
+        start, count = _v1_rate_limit_counters.get(principal, (now, 0))
+        if now - start >= timedelta(minutes=1):
+            _v1_rate_limit_counters[principal] = (now, 1)
+            return
+        if count >= V1_RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded.")
+        _v1_rate_limit_counters[principal] = (start, count + 1)
+
+
 def _require_v1_authorization(authorization: str | None = Header(None, alias="Authorization")) -> str:
     if not V1_AUTH_REQUIRED:
-        return "auth-disabled"
+        principal = "auth-disabled"
+        _enforce_v1_rate_limit(principal)
+        return principal
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
     parts = authorization.strip().split(" ", 1)
@@ -331,7 +351,9 @@ def _require_v1_authorization(authorization: str | None = Header(None, alias="Au
     token = parts[1].strip()
     if not token or not secrets.compare_digest(token, V1_AUTH_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid bearer token.")
-    return "service-token"
+    principal = "service-token"
+    _enforce_v1_rate_limit(principal)
+    return principal
 
 
 def _validate_payload_for_version(version: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -454,6 +476,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def v1_request_size_guard(request: Request, call_next):
+    if request.url.path.startswith("/api/v1/") and request.method.upper() in {"POST", "PUT", "PATCH"}:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > V1_MAX_REQUEST_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "code": "request_too_large",
+                            "message": "Request payload exceeds maximum allowed size.",
+                            "requestId": request.headers.get("x-request-id"),
+                        },
+                    )
+            except ValueError:
+                pass
+    return await call_next(request)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/v1/"):
+        detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "code": f"http_{exc.status_code}",
+                "message": detail,
+                "requestId": request.headers.get("x-request-id"),
+            },
+        )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    if request.url.path.startswith("/api/v1/"):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": "internal_error",
+                "message": "Internal server error.",
+                "requestId": request.headers.get("x-request-id"),
+            },
+        )
+    raise exc
 
 
 @app.get("/health")

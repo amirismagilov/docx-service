@@ -24,9 +24,19 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
+      - name: Install CI validation tools
+        run: pip install openapi-spec-validator pyyaml pip-audit
+
       - name: Run backend tests
         working-directory: backend
         run: pytest
+
+      - name: Validate OpenAPI contract
+        run: python scripts/validate_openapi.py
+
+      - name: Python dependency audit
+        working-directory: backend
+        run: pip-audit -r requirements.txt
 
   frontend:
     name: Frontend build
@@ -50,3 +60,7 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Frontend dependency audit
+        working-directory: frontend
+        run: npm audit --audit-level=high
