@@ -301,32 +301,54 @@ class ProductionStore:
             ).fetchall()
         return [uuid.UUID(row["id"]) for row in rows]
 
-    def get_document_statistics(self, document_id: uuid.UUID) -> dict[str, Any]:
+    def get_document_statistics(
+        self,
+        document_id: uuid.UUID,
+        *,
+        from_utc: datetime | None = None,
+        to_utc: datetime | None = None,
+    ) -> dict[str, Any]:
+        where = ["document_id = ?"]
+        params: list[Any] = [str(document_id)]
+        if from_utc is not None:
+            where.append("created_at_utc >= ?")
+            params.append(from_utc.isoformat().replace("+00:00", "Z"))
+        if to_utc is not None:
+            where.append("created_at_utc <= ?")
+            params.append(to_utc.isoformat().replace("+00:00", "Z"))
+        where_sql = " and ".join(where)
         with self._lock:
             rows = self._conn.execute(
-                "select status, count(*) as cnt from generation_requests where document_id = ? group by status",
-                (str(document_id),),
+                f"select status, count(*) as cnt from generation_requests where {where_sql} group by status",
+                tuple(params),
             ).fetchall()
             latency_rows = self._conn.execute(
-                """
-                select latency_ms
-                from generation_requests
-                where document_id = ? and latency_ms is not null
-                order by latency_ms
-                """,
-                (str(document_id),),
+                f"select latency_ms from generation_requests where {where_sql} and latency_ms is not null order by latency_ms",
+                tuple(params),
             ).fetchall()
             top_callers_rows = self._conn.execute(
                 """
                 select actor_id, count(*) as calls
                 from audit_events
                 where event_type = 'generation.requested'
-                  and generation_request_id in (select id from generation_requests where document_id = ?)
+                  and generation_request_id in (select id from generation_requests where """
+                + where_sql
+                + """)
                 group by actor_id
                 order by calls desc
                 limit 5
                 """,
-                (str(document_id),),
+                tuple(params),
+            ).fetchall()
+            daily_rows = self._conn.execute(
+                f"""
+                select substr(created_at_utc, 1, 10) as day, count(*) as calls
+                from generation_requests
+                where {where_sql}
+                group by substr(created_at_utc, 1, 10)
+                order by day asc
+                """,
+                tuple(params),
             ).fetchall()
         by_status = {row["status"]: int(row["cnt"]) for row in rows}
         total_calls = sum(by_status.values())
@@ -345,6 +367,7 @@ class ProductionStore:
                 "p99Ms": percentile(latencies, 99),
             },
             "topCallers": [{"clientId": row["actor_id"], "calls": int(row["calls"])} for row in top_callers_rows],
+            "dailyBuckets": [{"day": row["day"], "calls": int(row["calls"])} for row in daily_rows],
         }
 
     def _row_to_record(self, row: sqlite3.Row) -> GenerationRecord:

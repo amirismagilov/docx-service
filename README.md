@@ -33,7 +33,9 @@
 - `docs/e2e-test-cases.md` — каталог E2E кейсов.
 - `docs/roadmap/industrial-v1-delivery-roadmap.md` — поэтапный delivery roadmap.
 - `docs/ops/runbook-v1.md` — эксплуатационный runbook для v1.
+- `docs/ops/canary-rollout-checklist-v1.md` — чеклист канареечного выката.
 - `perf/README.md` — нагрузочные smoke/burst сценарии на k6.
+- `scripts/canary_smoke.sh` — автоматизированный canary smoke script.
 
 ## Быстрый старт
 

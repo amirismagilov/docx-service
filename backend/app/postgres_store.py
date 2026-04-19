@@ -247,21 +247,31 @@ class PostgresStore:
             rows = cur.fetchall()
         return [uuid.UUID(row["id"]) for row in rows]
 
-    def get_document_statistics(self, document_id: uuid.UUID) -> dict[str, Any]:
+    def get_document_statistics(
+        self,
+        document_id: uuid.UUID,
+        *,
+        from_utc: datetime | None = None,
+        to_utc: datetime | None = None,
+    ) -> dict[str, Any]:
+        where = ["document_id = %s"]
+        params: list[Any] = [str(document_id)]
+        if from_utc is not None:
+            where.append("created_at_utc >= %s")
+            params.append(from_utc.isoformat().replace("+00:00", "Z"))
+        if to_utc is not None:
+            where.append("created_at_utc <= %s")
+            params.append(to_utc.isoformat().replace("+00:00", "Z"))
+        where_sql = " and ".join(where)
         with self._conn.cursor() as cur:
             cur.execute(
-                "select status, count(*) as cnt from generation_requests where document_id = %s group by status",
-                (str(document_id),),
+                f"select status, count(*) as cnt from generation_requests where {where_sql} group by status",
+                tuple(params),
             )
             rows = cur.fetchall()
             cur.execute(
-                """
-                select latency_ms
-                from generation_requests
-                where document_id = %s and latency_ms is not null
-                order by latency_ms
-                """,
-                (str(document_id),),
+                f"select latency_ms from generation_requests where {where_sql} and latency_ms is not null order by latency_ms",
+                tuple(params),
             )
             latency_rows = cur.fetchall()
             cur.execute(
@@ -269,14 +279,27 @@ class PostgresStore:
                 select actor_id, count(*) as calls
                 from audit_events
                 where event_type = 'generation.requested'
-                  and generation_request_id in (select id from generation_requests where document_id = %s)
+                  and generation_request_id in (select id from generation_requests where """
+                + where_sql
+                + """)
                 group by actor_id
                 order by calls desc
                 limit 5
                 """,
-                (str(document_id),),
+                tuple(params),
             )
             top_rows = cur.fetchall()
+            cur.execute(
+                f"""
+                select substring(created_at_utc from 1 for 10) as day, count(*) as calls
+                from generation_requests
+                where {where_sql}
+                group by substring(created_at_utc from 1 for 10)
+                order by day asc
+                """,
+                tuple(params),
+            )
+            daily_rows = cur.fetchall()
         by_status = {row["status"]: int(row["cnt"]) for row in rows}
         total_calls = sum(by_status.values())
         latencies = [int(row["latency_ms"]) for row in latency_rows]
@@ -294,6 +317,7 @@ class PostgresStore:
                 "p99Ms": percentile(latencies, 99),
             },
             "topCallers": [{"clientId": row["actor_id"], "calls": int(row["calls"])} for row in top_rows],
+            "dailyBuckets": [{"day": row["day"], "calls": int(row["calls"])} for row in daily_rows],
         }
 
     def _row_to_record(self, row: dict[str, Any]) -> GenerationRecord:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 
@@ -70,7 +71,13 @@ class GenerationStore(Protocol):
 
     def list_queued_generation_ids(self) -> list[uuid.UUID]: ...
 
-    def get_document_statistics(self, document_id: uuid.UUID) -> dict[str, Any]: ...
+    def get_document_statistics(
+        self,
+        document_id: uuid.UUID,
+        *,
+        from_utc: datetime | None = None,
+        to_utc: datetime | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def percentile(values: list[int], p: int) -> int:

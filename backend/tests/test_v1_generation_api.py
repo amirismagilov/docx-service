@@ -198,3 +198,38 @@ def test_v1_rate_limit_returns_429() -> None:
             assert second.status_code == 429
     finally:
         main_module.V1_RATE_LIMIT_PER_MINUTE = original
+
+
+def test_v1_statistics_supports_time_window_and_daily_buckets() -> None:
+    _reset_state()
+    with TestClient(app) as client:
+        boot = client.post("/api/templates/bootstrap-empty", json={"name": "Doc"})
+        tid = boot.json()["templateId"]
+        vid = boot.json()["versionId"]
+        raw = build_docx_from_plain_text("Hello {{name}}")
+        client.post(
+            f"/api/templates/{tid}/versions/{vid}/upload-docx",
+            files={"file": ("template.docx", raw, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        )
+        r = client.post(
+            "/api/v1/generations/sync",
+            headers=AUTH_HEADERS,
+            json={"documentId": tid, "versionId": vid, "payload": {"name": "A"}},
+        )
+        assert r.status_code == 200
+        stats = client.get(
+            f"/api/v1/documents/{tid}/statistics?fromUtc=2020-01-01T00:00:00Z&toUtc=2035-01-01T00:00:00Z",
+            headers=AUTH_HEADERS,
+        )
+        assert stats.status_code == 200
+        body = stats.json()
+        assert "dailyBuckets" in body
+        assert isinstance(body["dailyBuckets"], list)
+
+
+def test_metrics_endpoint_exposes_prometheus_format() -> None:
+    _reset_state()
+    with TestClient(app) as client:
+        metrics = client.get("/metrics")
+        assert metrics.status_code == 200
+        assert "docx_v1_http_requests_total" in metrics.text

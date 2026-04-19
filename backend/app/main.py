@@ -14,6 +14,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
@@ -36,6 +37,15 @@ from app.docx_ops import (
     render_version_to_docx,
 )
 from app.generation_store import GenerationStore
+from app.observability import (
+    ASYNC_QUEUE_DEPTH,
+    GENERATION_DURATION_SECONDS,
+    GENERATION_TOTAL,
+    HTTP_V1_REQUEST_DURATION_SECONDS,
+    HTTP_V1_REQUESTS_TOTAL,
+    metrics_content_type,
+    metrics_payload,
+)
 from app.store_factory import create_generation_store
 from app.store_persistence import default_store_path, persist_templates, try_load_templates
 
@@ -404,6 +414,7 @@ def _ensure_production_store() -> GenerationStore:
 async def _process_v1_generation_job(job_id: uuid.UUID) -> None:
     store = _ensure_production_store()
     rec = store.get_generation(job_id)
+    started = perf_counter()
     try:
         store.mark_running(job_id)
         version = _resolve_published_version_for_v1(rec.document_id, rec.version_id)
@@ -416,8 +427,12 @@ async def _process_v1_generation_job(job_id: uuid.UUID) -> None:
             conditional_blocks=version.get("conditional_blocks") or [],
         )
         store.mark_succeeded(job_id, fn, data)
+        GENERATION_TOTAL.labels(mode="async", status="succeeded").inc()
+        GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
     except Exception as exc:  # noqa: BLE001
         store.mark_failed(job_id, "generation_error", str(exc))
+        GENERATION_TOTAL.labels(mode="async", status="failed").inc()
+        GENERATION_DURATION_SECONDS.labels(mode="async").observe(perf_counter() - started)
 
 
 async def _v1_worker_loop() -> None:
@@ -428,6 +443,7 @@ async def _v1_worker_loop() -> None:
             await _process_v1_generation_job(job_id)
         finally:
             v1_job_queue.task_done()
+            ASYNC_QUEUE_DEPTH.set(v1_job_queue.qsize())
 
 
 @asynccontextmanager
@@ -438,6 +454,7 @@ async def lifespan(app: FastAPI):
         templates, template_versions = loaded
     job_queue = asyncio.Queue()
     v1_job_queue = asyncio.Queue()
+    ASYNC_QUEUE_DEPTH.set(0)
     worker_task = asyncio.create_task(_worker_loop())
     production_store = create_generation_store(
         backend=GENERATION_STORE_BACKEND,
@@ -447,6 +464,7 @@ async def lifespan(app: FastAPI):
     )
     for queued_id in production_store.list_queued_generation_ids():
         await v1_job_queue.put(queued_id)
+    ASYNC_QUEUE_DEPTH.set(v1_job_queue.qsize())
     v1_worker_task = asyncio.create_task(_v1_worker_loop())
     yield
     if worker_task:
@@ -480,6 +498,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def v1_request_size_guard(request: Request, call_next):
+    started = perf_counter()
     if request.url.path.startswith("/api/v1/") and request.method.upper() in {"POST", "PUT", "PATCH"}:
         content_length = request.headers.get("content-length")
         if content_length:
@@ -495,7 +514,19 @@ async def v1_request_size_guard(request: Request, call_next):
                     )
             except ValueError:
                 pass
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/v1/"):
+        elapsed = perf_counter() - started
+        HTTP_V1_REQUESTS_TOTAL.labels(
+            method=request.method.upper(),
+            path=request.url.path,
+            status_code=str(response.status_code),
+        ).inc()
+        HTTP_V1_REQUEST_DURATION_SECONDS.labels(
+            method=request.method.upper(),
+            path=request.url.path,
+        ).observe(elapsed)
+    return response
 
 
 @app.exception_handler(HTTPException)
@@ -1488,6 +1519,7 @@ def generate_sync_v1(
         payload=body.payload,
         status="running",
     )
+    started = perf_counter()
     try:
         fn, data = render_version_to_docx(
             docx_bytes=version.get("docx_bytes"),
@@ -1498,6 +1530,8 @@ def generate_sync_v1(
             conditional_blocks=version.get("conditional_blocks") or [],
         )
         store.mark_succeeded(rec.id, fn, data)
+        GENERATION_TOTAL.labels(mode="sync", status="succeeded").inc()
+        GENERATION_DURATION_SECONDS.labels(mode="sync").observe(perf_counter() - started)
         return Response(
             content=data,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1508,6 +1542,8 @@ def generate_sync_v1(
         )
     except Exception as exc:  # noqa: BLE001
         store.mark_failed(rec.id, "generation_error", str(exc))
+        GENERATION_TOTAL.labels(mode="sync", status="failed").inc()
+        GENERATION_DURATION_SECONDS.labels(mode="sync").observe(perf_counter() - started)
         raise HTTPException(status_code=500, detail="Generation failed.") from exc
 
 
@@ -1545,6 +1581,7 @@ async def generate_async_v1(
     if v1_job_queue is None:
         raise HTTPException(status_code=503, detail="Generation queue is unavailable.")
     await v1_job_queue.put(rec.id)
+    ASYNC_QUEUE_DEPTH.set(v1_job_queue.qsize())
     store.add_audit_event(
         generation_request_id=rec.id,
         event_type="generation.queued",
@@ -1592,10 +1629,17 @@ def get_generation_result_v1(job_id: uuid.UUID, _actor: str = Depends(_require_v
 @app.get("/api/v1/documents/{document_id}/statistics")
 def get_document_statistics_v1(
     document_id: uuid.UUID,
+    fromUtc: datetime | None = None,
+    toUtc: datetime | None = None,
     _actor: str = Depends(_require_v1_authorization),
 ) -> dict[str, Any]:
     store = _ensure_production_store()
-    return store.get_document_statistics(document_id)
+    return store.get_document_statistics(document_id, from_utc=fromUtc, to_utc=toUtc)
+
+
+@app.get("/metrics")
+def get_metrics() -> Response:
+    return Response(content=metrics_payload(), media_type=metrics_content_type())
 
 
 @app.post("/api/webhooks/test")
