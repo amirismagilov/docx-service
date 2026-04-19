@@ -38,6 +38,8 @@
 - `docs/ops/canary-rollout-checklist-v1.md` — чеклист канареечного выката.
 - `perf/README.md` — нагрузочные smoke/burst сценарии на k6.
 - `scripts/canary_smoke.sh` — автоматизированный canary smoke script.
+- `scripts/backup_generation_store.sh` — создание backup bundle generation store + artifacts.
+- `scripts/dr_restore_smoke.sh` — DR restore smoke для backup bundle.
 
 ## Быстрый старт
 

@@ -282,3 +282,17 @@ Each case is described as:
 - Expected audit events:
   - worker lifecycle incident event
   - request-level final states preserved.
+
+### TC-DR-001: Backup and restore smoke
+- ID: `TC-DR-001`
+- Preconditions:
+  - Generation store contains recent requests/events.
+  - Access to backup target location.
+- Request:
+  - Run `scripts/backup_generation_store.sh`.
+  - Run `scripts/dr_restore_smoke.sh` against produced bundle.
+- Expected response:
+  - Backup bundle created with checksum file.
+  - Restore smoke validates required tables and readable records.
+- Expected audit events:
+  - Optional operational event for backup/restore workflow.

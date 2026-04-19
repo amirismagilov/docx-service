@@ -47,8 +47,37 @@ Security:
 - Async queued jobs are restored on service restart via durable generation store.
 - If artifact files missing, status remains succeeded but result endpoint returns `410`.
 
+## Backup and Restore (DR)
+
+Backup bundle:
+```bash
+DOCX_SERVICE_GENERATION_STORE=sqlite \
+DOCX_SERVICE_DB_PATH=./backend/data/production.db \
+DOCX_SERVICE_RESULTS_DIR=./backend/data/results \
+./scripts/backup_generation_store.sh
+```
+
+Restore smoke (SQLite):
+```bash
+BACKUP_DIR=/tmp/docx-service-backups/<timestamp> \
+./scripts/dr_restore_smoke.sh
+```
+
+Restore smoke (Postgres):
+```bash
+BACKUP_DIR=/tmp/docx-service-backups/<timestamp> \
+RESTORE_PG_DSN=postgresql://user:pass@localhost:5432/docx_restore \
+./scripts/dr_restore_smoke.sh
+```
+
+Operational notes:
+- Keep backup bundles encrypted-at-rest in target storage.
+- Run backup daily and DR restore smoke at least weekly.
+- Store the latest successful DR smoke evidence in release artifacts.
+
 ## Release Verification
 1. Run backend tests (`pytest`).
 2. Validate OpenAPI (`python scripts/validate_openapi.py`).
 3. Run perf smoke (`k6` sync scenario).
-4. Confirm CI pipeline green.
+4. Run DR restore smoke (`scripts/dr_restore_smoke.sh`).
+5. Confirm CI pipeline green.
