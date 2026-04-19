@@ -1247,11 +1247,11 @@ export default function DocumentEditPage() {
       if (!host) return
       const normalizedBlock = normalizeTagFindText(block.findTemplate).trim()
       if (!normalizedBlock) return
+      const normalizeScan = (s: string) => normalizeTagFindText(s).replace(/\s+/g, ' ').trim().toLowerCase()
 
       const hostText = normalizeTagFindText(host.innerText)
       const matchStart = nthOccurrenceAt(hostText, normalizedBlock, block.occurrenceIndex)
-      if (matchStart < 0) return
-      const matchEnd = matchStart + normalizedBlock.length
+      const matchEnd = matchStart >= 0 ? matchStart + normalizedBlock.length : -1
 
       // Для docx-preview надежнее подсвечивать реальные текстовые блоки (ячейки/абзацы).
       const blockElements = Array.from(host.querySelectorAll<HTMLElement>('p, li, td, th')).filter(
@@ -1260,13 +1260,68 @@ export default function DocumentEditPage() {
       if (blockElements.length === 0) return
 
       const selected: HTMLElement[] = []
-      for (const el of blockElements) {
-        const start = textOffsetFromRootToNodeBoundary(host, el, false)
-        const end = textOffsetFromRootToNodeBoundary(host, el, true)
-        if (end <= start) continue
-        if (end <= matchStart) continue
-        if (start >= matchEnd) continue
-        selected.push(el)
+      if (matchStart >= 0) {
+        for (const el of blockElements) {
+          const start = textOffsetFromRootToNodeBoundary(host, el, false)
+          const end = textOffsetFromRootToNodeBoundary(host, el, true)
+          if (end <= start) continue
+          if (end <= matchStart) continue
+          if (start >= matchEnd) continue
+          selected.push(el)
+        }
+      }
+
+      // Fallback для сложной верстки таблиц: если точный offset-матч не сработал,
+      // ищем лучший блок(и) по строкам выделенного фрагмента.
+      if (selected.length === 0) {
+        const candidateLines = normalizedBlock
+          .split('\n')
+          .map((x) => normalizeScan(x))
+          .filter(Boolean)
+        const anchorLine =
+          candidateLines.find((ln) => ln.length >= 4) ??
+          candidateLines.find((ln) => ln.length > 0) ??
+          ''
+        if (candidateLines.length > 0) {
+          const elementTexts = blockElements.map((el) => normalizeScan(el.innerText || el.textContent || ''))
+          const hitIndices: number[] = []
+          for (let i = 0; i < elementTexts.length; i += 1) {
+            if (anchorLine && elementTexts[i].includes(anchorLine)) hitIndices.push(i)
+          }
+
+          let baseIdx = -1
+          if (hitIndices.length > 0) {
+            baseIdx = hitIndices[Math.min(block.occurrenceIndex, hitIndices.length - 1)]
+          } else {
+            let bestScore = 0
+            for (let i = 0; i < elementTexts.length; i += 1) {
+              let score = 0
+              for (const ln of candidateLines) {
+                if (elementTexts[i].includes(ln)) score += 1
+              }
+              if (score > bestScore) {
+                bestScore = score
+                baseIdx = i
+              }
+            }
+          }
+
+          if (baseIdx >= 0) {
+            // Расширяем вверх, если предыдущие блоки содержат ранние строки фрагмента.
+            for (let i = baseIdx - 1; i >= 0; i -= 1) {
+              const t = elementTexts[i]
+              if (candidateLines.some((ln) => t.includes(ln))) selected.unshift(blockElements[i])
+              else break
+            }
+            selected.push(blockElements[baseIdx])
+            // Расширяем подсветку на соседние элементы, если они содержат остальные строки.
+            for (let i = baseIdx + 1; i < blockElements.length; i += 1) {
+              const t = elementTexts[i]
+              if (candidateLines.some((ln) => t.includes(ln))) selected.push(blockElements[i])
+              else break
+            }
+          }
+        }
       }
       if (selected.length === 0) return
 
