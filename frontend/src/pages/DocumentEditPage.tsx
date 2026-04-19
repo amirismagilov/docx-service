@@ -141,6 +141,31 @@ function occurrenceIndexAt(fullText: string, needle: string, needleStartAt: numb
   return 0
 }
 
+function nthOccurrenceAt(fullText: string, needle: string, occurrenceIndex: number): number {
+  if (!needle) return -1
+  let pos = 0
+  let seen = 0
+  while (pos <= fullText.length) {
+    const i = fullText.indexOf(needle, pos)
+    if (i < 0) break
+    if (seen === occurrenceIndex) return i
+    seen += 1
+    pos = i + Math.max(1, needle.length)
+  }
+  return -1
+}
+
+function textOffsetFromRootToNodeBoundary(root: HTMLElement, node: Node, atEnd: boolean): number {
+  const r = document.createRange()
+  r.setStart(root, 0)
+  if (atEnd) {
+    r.setEndAfter(node)
+  } else {
+    r.setEndBefore(node)
+  }
+  return normalizeTagFindText(r.toString()).length
+}
+
 function normalizeBetweenPlaceholders(between: string): string {
   return between
     .replace(/\u200b/g, '')
@@ -1220,91 +1245,32 @@ export default function DocumentEditPage() {
     (block: ConditionalBlock) => {
       const host = previewRef.current
       if (!host) return
-      const normalizedBlock = normalizeTagFindText(block.findTemplate)
-      const candidateLines = normalizedBlock
-        .split('\n')
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .sort((a, b) => b.length - a.length)
-      if (!candidateLines.length) return
+      const normalizedBlock = normalizeTagFindText(block.findTemplate).trim()
+      if (!normalizedBlock) return
 
-      const normalizeScan = (s: string) => normalizeTagFindText(s).replace(/\s+/g, ' ').trim().toLowerCase()
-      const normalizedFullNeedle = normalizeScan(normalizedBlock)
-      if (!normalizedFullNeedle) return
+      const hostText = normalizeTagFindText(host.innerText)
+      const matchStart = nthOccurrenceAt(hostText, normalizedBlock, block.occurrenceIndex)
+      if (matchStart < 0) return
+      const matchEnd = matchStart + normalizedBlock.length
 
-      // Для docx-preview надежнее опираться на реальные текстовые блоки (абзацы/ячейки),
-      // а не на div-контейнеры, иначе можно отфильтровать все элементы.
-      const blockElements = Array.from(host.querySelectorAll<HTMLElement>('p, li, td, th')).filter((el) => {
-        const text = normalizeScan(el.innerText || el.textContent || '')
-        return Boolean(text)
-      })
+      // Для docx-preview надежнее подсвечивать реальные текстовые блоки (ячейки/абзацы).
+      const blockElements = Array.from(host.querySelectorAll<HTMLElement>('p, li, td, th')).filter(
+        (el) => normalizeTagFindText(el.innerText || el.textContent || '').trim().length > 0,
+      )
       if (blockElements.length === 0) return
 
-      const elementTexts = blockElements.map((el) => normalizeScan(el.innerText || el.textContent || ''))
-      const separator = ' '
-      const joined = elementTexts.join(separator)
-      if (!joined) return
-
-      let occurrenceHits = 0
-      let charIndex = -1
-      let searchFrom = 0
-      while (true) {
-        const found = joined.indexOf(normalizedFullNeedle, searchFrom)
-        if (found < 0) break
-        if (occurrenceHits === block.occurrenceIndex) {
-          charIndex = found
-          break
-        }
-        occurrenceHits += 1
-        searchFrom = found + Math.max(1, normalizedFullNeedle.length)
+      const selected: HTMLElement[] = []
+      for (const el of blockElements) {
+        const start = textOffsetFromRootToNodeBoundary(host, el, false)
+        const end = textOffsetFromRootToNodeBoundary(host, el, true)
+        if (end <= start) continue
+        if (end <= matchStart) continue
+        if (start >= matchEnd) continue
+        selected.push(el)
       }
-      if (charIndex < 0) {
-        // fallback: по строкам. Берем элемент с максимальным числом совпавших строк.
-        const lineNeedles = candidateLines.map((x) => normalizeScan(x)).filter(Boolean)
-        if (!lineNeedles.length) return
-        let bestIdx = -1
-        let bestScore = 0
-        for (let i = 0; i < elementTexts.length; i += 1) {
-          const t = elementTexts[i]
-          let score = 0
-          for (const ln of lineNeedles) {
-            if (t.includes(ln)) score += 1
-          }
-          if (score > bestScore) {
-            bestScore = score
-            bestIdx = i
-          }
-        }
-        if (bestIdx < 0 || bestScore === 0) return
-        clearConditionalPreviewHighlight()
-        const el = blockElements[bestIdx]
-        el.classList.add('preview-conditional-hit-active')
-        activeConditionalPreviewElementsRef.current = [el]
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        return
-      }
-
-      const starts: number[] = []
-      const ends: number[] = []
-      let pos = 0
-      for (const txt of elementTexts) {
-        const start = pos
-        const end = start + txt.length
-        starts.push(start)
-        ends.push(end)
-        pos = end + separator.length
-      }
-      const matchStart = charIndex
-      const matchEnd = charIndex + normalizedFullNeedle.length
-
-      let startIdx = 0
-      while (startIdx < starts.length && ends[startIdx] <= matchStart) startIdx += 1
-      let endIdx = startIdx
-      while (endIdx < starts.length && starts[endIdx] < matchEnd) endIdx += 1
-      endIdx = Math.max(startIdx, endIdx - 1)
+      if (selected.length === 0) return
 
       clearConditionalPreviewHighlight()
-      const selected = blockElements.slice(startIdx, endIdx + 1)
       for (const el of selected) {
         el.classList.add('preview-conditional-hit-active')
       }
