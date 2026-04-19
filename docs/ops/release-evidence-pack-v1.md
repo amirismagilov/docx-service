@@ -92,3 +92,5 @@ GitHub Actions option:
 ## Storage and Retention
 - Store evidence pack alongside release artifacts in immutable release storage.
 - Keep at least one year of release evidence history.
+- Recommended repository path for generated records:
+  - `docs/ops/evidence/`
